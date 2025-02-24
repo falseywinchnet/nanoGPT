@@ -143,9 +143,9 @@ class ITD_Linear(nn.Module):
                 d_ip1 = d[:, i_range + 1]
                 w1, w2 = (d_ip1 - d_i).abs(), (d_im1 - d_im2).abs()
                 denom = w1 + w2 + 1e-12
-                m[:, i_range] = torch.where(denom >= 1e-6, 
-                                            (w1 * d_im1 + w2 * d_i) / (denom + 1e-12),
-                                            0.5 * (d_im1 + d_i))
+                #m[:, i_range] = torch.where(denom >= 1e-6, 
+                               #             (w1 * d_im1 + w2 * d_i) / (denom + 1e-12),
+                                #            0.5 * (d_im1 + d_i))
 
             # Unpack the precomputed basis functions
             h00, h10, h01, h11 = basis
