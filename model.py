@@ -123,8 +123,8 @@ class ITD_Linear(nn.Module):
 
         # Iterate over each scale using the stored buffer names.
         for scale_idx, (grid_name, basis_name) in enumerate(zip(self.grid_names, self.basis_names)):
-            grid = getattr(self, grid_name)  # already on correct device after model.to(device)
-            basis = getattr(self, basis_name)
+            grid = getattr(self, grid_name).to(device)
+            basis = getattr(self, basis_name).to(device)
             grid_size_int = grid.shape[0]
 
             # Extract grid point values (batch, grid_size_int)
@@ -143,6 +143,7 @@ class ITD_Linear(nn.Module):
                 d_i   = d[:, i_range]
                 d_ip1 = d[:, i_range + 1]
                 w1, w2 = (d_ip1 - d_i).abs(), (d_im1 - d_im2).abs()
+                print(w1.device,w2.device,m.device,d_im2.device,d_i.device,denom.device)
                 denom = w1 + w2 + 1e-12
                 m[:, i_range] = torch.where(denom >= 1e-6, 
                                             (w1 * d_im1 + w2 * d_i) / (denom + 1e-12),
