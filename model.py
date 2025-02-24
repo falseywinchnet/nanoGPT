@@ -116,15 +116,14 @@ class ITD_Linear(nn.Module):
             self.basis_names.append(basis_name)
 
     def forward(self, x):
-        device = x.device
-        positions = self.positions.to(device)
+        positions = self.positions.to(device=x.device)
         batch, L, _ = x.shape
         outputs = []
 
         # Iterate over each scale using the stored buffer names.
         for scale_idx, (grid_name, basis_name) in enumerate(zip(self.grid_names, self.basis_names)):
-            grid = getattr(self, grid_name).to(device)
-            basis = getattr(self, basis_name).to(device)
+            grid = getattr(self, grid_name).to(device=x.device)
+            basis = getattr(self, basis_name).to(device=x.device)
             grid_size_int = grid.shape[0]
 
             # Extract grid point values (batch, grid_size_int)
@@ -132,12 +131,12 @@ class ITD_Linear(nn.Module):
 
             # Compute finite differences between adjacent grid points
             d = (ext_vals[:, 1:] - ext_vals[:, :-1]) / (grid[1:] - grid[:-1] + 1e-12)
-            print(x.device,d.device,grid.device)
-            m = torch.zeros((batch, grid_size_int), device=device, dtype=x.dtype)
+
+            m = torch.zeros((batch, grid_size_int), device=x.device, dtype=x.dtype)
             m[:, [0, 1, -2, -1]] = d[:, [0, 0, -1, -1]]
 
             if grid_size_int > 3:
-                i_range = torch.arange(2, grid_size_int - 2, device=device)
+                i_range = torch.arange(2, grid_size_int - 2, device=x.device)
                 d_im2 = d[:, i_range - 2]
                 d_im1 = d[:, i_range - 1]
                 d_i   = d[:, i_range]
