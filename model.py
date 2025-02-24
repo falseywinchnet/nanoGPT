@@ -68,55 +68,41 @@ class CausalSelfAttention(nn.Module):
 
 class ITD_Linear(nn.Module):
     def __init__(self, input_dim, output_dim, input_length, use_bias=False):
-        """
-        input_dim: Number of features per time point (typically 1)
-        output_dim: Number of scales (grid resolutions)
-        input_length: Fixed length of the input sequence
-        use_bias: Whether to include a learnable per-scale bias.
-        """
-        # Fixing the super call to match the class name.
         super(ITD_Linear, self).__init__()
         self.input_length = input_length
         self.output_dim = output_dim
         self.use_bias = use_bias
 
-        # Create a per-scale bias parameter if needed (requires gradients)
         if use_bias:
             self.bias = nn.Parameter(torch.zeros((output_dim, 1), dtype=torch.float32))
         else:
             self.register_parameter('bias', None)
 
-        # Precompute positions and register as buffer
         positions = torch.arange(input_length, dtype=torch.float32)
         self.register_buffer('positions', positions)
 
-        # Store precomputed grids and basis functions as buffers (non-trainable)
-        self.precomputed_grids = []
-        self.precomputed_basis = []
+        # Instead of storing tensors in lists, we store the names of the buffers.
+        self.grid_names = []
+        self.basis_names = []
 
-        # Scales for grid resolutions
         scales = torch.linspace(2, input_length // 2, output_dim)
-
         for grid_size in scales:
             grid_size_int = int(grid_size.item())
             indices = torch.linspace(0, input_length - 1, grid_size_int).long()
 
-            # Register grid indices as buffer (non-float, non-trainable)
             grid_name = f'grid_{grid_size_int}'
             self.register_buffer(grid_name, indices)
-            self.precomputed_grids.append(getattr(self, grid_name))
+            self.grid_names.append(grid_name)
 
-            # Precompute normalized interpolation parameter `t`
             scale_factor = (grid_size_int - 1) / (input_length - 1)
             seg_idx = (positions * scale_factor).long().clamp(0, grid_size_int - 2)
 
             x_grid = indices.to(torch.float32)
             grid_start = x_grid[seg_idx]
             grid_end = x_grid[seg_idx + 1]
-            delta = grid_end - grid_start + 1e-12  # Avoid zero division
+            delta = grid_end - grid_start + 1e-12  # Avoid division by zero
             t = (positions - grid_start) / delta
 
-            # Precompute cubic Hermite basis functions
             t2 = t * t
             t3 = t2 * t
             h00 = 2 * t3 - 3 * t2 + 1
@@ -124,68 +110,61 @@ class ITD_Linear(nn.Module):
             h01 = -2 * t3 + 3 * t2
             h11 = t3 - t2
 
-            # Stack basis functions and register as buffer
             basis = torch.stack([h00, h10, h01, h11], dim=0)  # shape: (4, L)
             basis_name = f'basis_{grid_size_int}'
             self.register_buffer(basis_name, basis)
-            self.precomputed_basis.append(getattr(self, basis_name))
+            self.basis_names.append(basis_name)
 
     def forward(self, x):
         device = x.device
-        positions = self.positions.to(device)  # ensure positions is on the correct device
+        positions = self.positions.to(device)
         batch, L, _ = x.shape
         outputs = []
 
-        # Positions already on the correct device via register_buffer
-        precomputed_grids = self.precomputed_grids.to(device)
-        for scale_idx, indices in enumerate(precomputed_grids):
-            grid_size_int = indices.shape[0]
+        # Iterate over each scale using the stored buffer names.
+        for scale_idx, (grid_name, basis_name) in enumerate(zip(self.grid_names, self.basis_names)):
+            grid = getattr(self, grid_name)  # already on correct device after model.to(device)
+            basis = getattr(self, basis_name)
+            grid_size_int = grid.shape[0]
 
             # Extract grid point values (batch, grid_size_int)
-            print("Device at this point:", device)
-            print("Indices device before .to():", indices.device)
-            ext_vals = x[:, indices, 0]  # assumes a single channel per feature
-            x_grid = indices.to(device=device,torch.float32)
-            print(x_grid.device,"x_grid")
+            ext_vals = x[:, grid, 0]
 
             # Compute finite differences between adjacent grid points
-            d = (ext_vals[:, 1:] - ext_vals[:, :-1]) / (x_grid[1:] - x_grid[:-1] + 1e-12)
+            d = (ext_vals[:, 1:] - ext_vals[:, :-1]) / (grid[1:] - grid[:-1] + 1e-12)
 
-            # Initialize slopes `m`
             m = torch.zeros((batch, grid_size_int), device=device, dtype=x.dtype)
-            m[:, [0, 1, -2, -1]] = d[:, [0, 0, -1, -1]]  # Edge slopes
+            m[:, [0, 1, -2, -1]] = d[:, [0, 0, -1, -1]]
 
-            # Apply Akima weighting
             if grid_size_int > 3:
                 i_range = torch.arange(2, grid_size_int - 2, device=device)
-                d_im2, d_im1, d_i, d_ip1 = d[:, i_range - 2], d[:, i_range - 1], d[:, i_range], d[:, i_range + 1]
+                d_im2 = d[:, i_range - 2]
+                d_im1 = d[:, i_range - 1]
+                d_i   = d[:, i_range]
+                d_ip1 = d[:, i_range + 1]
                 w1, w2 = (d_ip1 - d_i).abs(), (d_im1 - d_im2).abs()
-                denom = w1 + w2 + 1e-12  # Small epsilon to avoid division by zero
-
+                denom = w1 + w2 + 1e-12
                 m[:, i_range] = torch.where(denom >= 1e-6, 
-                            (w1 * d_im1 + w2 * d_i) / (denom + 1e-12), 
-                            0.5 * (d_im1 + d_i))
-            # Use precomputed basis functions
-            h00, h10, h01, h11 = self.precomputed_basis[scale_idx]
+                                            (w1 * d_im1 + w2 * d_i) / (denom + 1e-12),
+                                            0.5 * (d_im1 + d_i))
 
-            # Segment indices
+            # Unpack the precomputed basis functions
+            h00, h10, h01, h11 = basis
+
             scale_factor = (grid_size_int - 1) / (L - 1)
             seg_idx = (positions * scale_factor).long().clamp(0, grid_size_int - 2)
 
-            # Gather grid points for interpolation
             seg_idx_exp = seg_idx.unsqueeze(0).expand(batch, -1)
             seg_idx_plus = (seg_idx + 1).unsqueeze(0).expand(batch, -1)
 
-            y0, y1 = torch.gather(ext_vals, 1, seg_idx_exp), torch.gather(ext_vals, 1, seg_idx_plus)
-            m0, m1 = torch.gather(m, 1, seg_idx_exp), torch.gather(m, 1, seg_idx_plus)
+            y0 = torch.gather(ext_vals, 1, seg_idx_exp)
+            y1 = torch.gather(ext_vals, 1, seg_idx_plus)
+            m0 = torch.gather(m, 1, seg_idx_exp)
+            m1 = torch.gather(m, 1, seg_idx_plus)
 
-            # Compute delta for scaling
-            delta = (x_grid[1] - x_grid[0]).unsqueeze(0).expand(batch, L)
-
-            # Apply precomputed basis functions
+            delta = (grid[1] - grid[0]).unsqueeze(0).expand(batch, L)
             baseline = h00 * y0 + h10 * m0 * delta + h01 * y1 + h11 * m1 * delta
 
-            # Add per-scale bias if used
             if self.bias is not None:
                 baseline += self.bias[scale_idx]
 
