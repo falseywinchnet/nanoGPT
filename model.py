@@ -206,12 +206,7 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        if getattr(config, 'use_itd', False):
-            # Instead of a plain linear expansion, use the ITD-based expansion.
-            # We want to map from (n_embd) -> (4 * n_embd) by processing each channel separately.
-            self.c_fc = ITDWrapper(config.n_embd, 4 * config.n_embd, config.block_size, bias=config.bias)
-        else:
-            self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.gelu    = nn.GELU()
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
@@ -266,6 +261,15 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # weight tying: share the weights between the token embedding and the final output layer.
         self.transformer.wte.weight = self.lm_head.weight
+        
+        if config.use_itd:
+            # ITDWrapper produces an output of shape (B, t, 4*n_embd)
+            self.itd_embedding = ITDWrapper(config.n_embd, 4 * config.n_embd, config.block_size, bias=config.bias)
+            self.itd_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        else:
+            self.itd_embedding = None
+            self.itd_proj = None
+            
 
         # init all weights
         self.apply(self._init_weights)
@@ -306,7 +310,12 @@ class GPT(nn.Module):
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos)    # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        x = tok_emb + pos_emb
+        if self.config.use_itd:
+            x_enhanced = self.itd_proj(self.itd_embedding(x))  # (B, t, n_embd)
+            x = x + x_enhanced
+                    
+        x = self.transformer.drop(x)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
