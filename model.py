@@ -69,7 +69,7 @@ class CausalSelfAttention(nn.Module):
 
 
 class ITD_Linear(nn.Module):
-    def __init__(self, input_dim, output_dim, input_length, use_bias=False):
+    def __init__(self, input_dim, output_dim, input_length, use_bias=True):
         super(ITD_Linear, self).__init__()
         self.input_length = input_length
         self.output_dim = output_dim
