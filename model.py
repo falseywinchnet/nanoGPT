@@ -144,7 +144,8 @@ class ITD_Linear(nn.Module):
 
             # Extract grid point values (batch, grid_size_int)
             ext_vals = x[:, indices, 0]  # assumes a single channel per feature
-            x_grid = indices.to(device,torch.float32)
+            x_grid = indices.to(device=device,torch.float32)
+            print(x_grid.device,"x_grid")
 
             # Compute finite differences between adjacent grid points
             d = (ext_vals[:, 1:] - ext_vals[:, :-1]) / (x_grid[1:] - x_grid[:-1] + 1e-12)
