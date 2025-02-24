@@ -132,7 +132,7 @@ class ITD_Linear(nn.Module):
 
             # Compute finite differences between adjacent grid points
             d = (ext_vals[:, 1:] - ext_vals[:, :-1]) / (grid[1:] - grid[:-1] + 1e-12)
-
+            print(x.device,d.device,grid.device)
             m = torch.zeros((batch, grid_size_int), device=device, dtype=x.dtype)
             m[:, [0, 1, -2, -1]] = d[:, [0, 0, -1, -1]]
 
@@ -143,7 +143,6 @@ class ITD_Linear(nn.Module):
                 d_i   = d[:, i_range]
                 d_ip1 = d[:, i_range + 1]
                 w1, w2 = (d_ip1 - d_i).abs(), (d_im1 - d_im2).abs()
-                print(w1.device,w2.device,m.device,d_im2.device,d_i.device,denom.device)
                 denom = w1 + w2 + 1e-12
                 m[:, i_range] = torch.where(denom >= 1e-6, 
                                             (w1 * d_im1 + w2 * d_i) / (denom + 1e-12),
