@@ -175,34 +175,32 @@ class ITD_Linear(nn.Module):
 class ITDWrapper(nn.Module):
     """
     Wraps ITD_Linear to apply it independently to each feature.
-    We assume that the desired output dimension is 4 * in_features.
-    For now we instantiate ITD_Linear with output_dim=1 (i.e. a single scale)
-    and then replicate the result 4×.
+    Now, instead of mirroring a single-scale output across four channels,
+    we directly output four distinct scales per feature.
     """
     def __init__(self, in_features, out_features, input_length, bias=False):
         super().__init__()
-        # For now, we require out_features to be exactly 4 times in_features.
+        # Ensure out_features is exactly 4 times in_features.
         assert out_features == 4 * in_features, "ITDWrapper expects out_features to equal 4 * in_features"
         self.expansion_factor = 4
-        # Note: ITD_Linear is designed for a single input channel.
-        self.itd = ITD_Linear(input_dim=1, output_dim=1, input_length=input_length, use_bias=bias)
+        # Instantiate ITD_Linear with output_dim=4 for four distinct scales.
+        self.itd = ITD_Linear(input_dim=1, output_dim=self.expansion_factor, input_length=input_length, use_bias=bias)
 
     def forward(self, x):
         # x: (B, L, in_features)
         B, L, in_features = x.shape
         # Process each feature independently: reshape to (B*in_features, L, 1)
         x_reshaped = x.transpose(1, 2).reshape(B * in_features, L, 1)
-        # Apply ITD_Linear: output shape (B*in_features, 1, L)
+        # Apply ITD_Linear: output shape (B*in_features, 4, L)
         y = self.itd(x_reshaped)
-        # Replicate the output 4 times along the scale dimension
-        y = y.repeat(1, self.expansion_factor, 1)  # now (B*in_features, 4, L)
-        # Reshape back: first to (B, in_features, 4, L)
+        # Reshape back to (B, in_features, 4, L)
         y = y.reshape(B, in_features, self.expansion_factor, L)
         # Permute to (B, L, in_features, 4)
         y = y.permute(0, 3, 1, 2)
-        # Finally, merge the last two dimensions to get (B, L, 4*in_features)
+        # Merge the last two dimensions to get (B, L, 4*in_features)
         y = y.reshape(B, L, in_features * self.expansion_factor)
         return y
+
 
 class MLP(nn.Module):
 
