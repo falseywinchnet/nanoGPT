@@ -143,6 +143,8 @@ class ITD_Linear(nn.Module):
             grid_size_int = indices.shape[0]
 
             # Extract grid point values (batch, grid_size_int)
+            print("Device at this point:", device)
+            print("Indices device before .to():", indices.device)
             ext_vals = x[:, indices, 0]  # assumes a single channel per feature
             x_grid = indices.to(device=device,torch.float32)
             print(x_grid.device,"x_grid")
