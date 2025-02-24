@@ -150,12 +150,12 @@ class ITD_Linear(nn.Module):
             d = (ext_vals[:, 1:] - ext_vals[:, :-1]) / (x_grid[1:] - x_grid[:-1] + 1e-12)
 
             # Initialize slopes `m`
-            m = torch.zeros((batch, grid_size_int), device=x.device, dtype=x.dtype)
+            m = torch.zeros((batch, grid_size_int), device=device, dtype=x.dtype)
             m[:, [0, 1, -2, -1]] = d[:, [0, 0, -1, -1]]  # Edge slopes
 
             # Apply Akima weighting
             if grid_size_int > 3:
-                i_range = torch.arange(2, grid_size_int - 2, device=x.device)
+                i_range = torch.arange(2, grid_size_int - 2, device=device)
                 d_im2, d_im1, d_i, d_ip1 = d[:, i_range - 2], d[:, i_range - 1], d[:, i_range], d[:, i_range + 1]
                 w1, w2 = (d_ip1 - d_i).abs(), (d_im1 - d_im2).abs()
                 denom = w1 + w2 + 1e-12  # Small epsilon to avoid division by zero
