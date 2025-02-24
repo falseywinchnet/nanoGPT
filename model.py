@@ -66,6 +66,8 @@ class CausalSelfAttention(nn.Module):
         y = self.resid_dropout(self.c_proj(y))
         return y
 
+
+
 class ITD_Linear(nn.Module):
     def __init__(self, input_dim, output_dim, input_length, use_bias=False):
         super(ITD_Linear, self).__init__()
@@ -116,19 +118,17 @@ class ITD_Linear(nn.Module):
             self.basis_names.append(basis_name)
 
     def forward(self, x):
-        positions = self.positions.to(device=x.device)
         batch, L, _ = x.shape
         outputs = []
 
         # Iterate over each scale using the stored buffer names.
         for scale_idx, (grid_name, basis_name) in enumerate(zip(self.grid_names, self.basis_names)):
-            grid = getattr(self, grid_name).to(device=x.device)
-            basis = getattr(self, basis_name).to(device=x.device)
+            grid = getattr(self, grid_name)
+            basis = getattr(self, basis_name)
             grid_size_int = grid.shape[0]
 
             # Extract grid point values (batch, grid_size_int)
             ext_vals = x[:, grid, 0]
-
             # Compute finite differences between adjacent grid points
             d = (ext_vals[:, 1:] - ext_vals[:, :-1]) / (grid[1:] - grid[:-1] + 1e-12)
 
@@ -143,15 +143,15 @@ class ITD_Linear(nn.Module):
                 d_ip1 = d[:, i_range + 1]
                 w1, w2 = (d_ip1 - d_i).abs(), (d_im1 - d_im2).abs()
                 denom = w1 + w2 + 1e-12
-                #m[:, i_range] = torch.where(denom >= 1e-6, 
-                               #             (w1 * d_im1 + w2 * d_i) / (denom + 1e-12),
-                                #            0.5 * (d_im1 + d_i))
+                m[:, i_range] = torch.where(denom >= 1e-6, 
+                                            (w1 * d_im1 + w2 * d_i) / (denom + 1e-12),
+                                            0.5 * (d_im1 + d_i))
 
             # Unpack the precomputed basis functions
             h00, h10, h01, h11 = basis
 
             scale_factor = (grid_size_int - 1) / (L - 1)
-            seg_idx = (positions * scale_factor).long().clamp(0, grid_size_int - 2)
+            seg_idx = (self.positions * scale_factor).long().clamp(0, grid_size_int - 2)
 
             seg_idx_exp = seg_idx.unsqueeze(0).expand(batch, -1)
             seg_idx_plus = (seg_idx + 1).unsqueeze(0).expand(batch, -1)
@@ -169,7 +169,8 @@ class ITD_Linear(nn.Module):
 
             outputs.append(baseline.unsqueeze(1))  # (batch, 1, L) for each scale
 
-        return torch.cat(outputs, dim=1)  # (batch, output_dim, L)
+        result = torch.cat(outputs, dim=1)  # (batch, output_dim, L)
+        return result
 
 class ITDWrapper(nn.Module):
     """
