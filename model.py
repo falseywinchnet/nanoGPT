@@ -137,9 +137,8 @@ class ITD_Linear(nn.Module):
         outputs = []
 
         # Positions already on the correct device via register_buffer
-        positions = self.positions
-
-        for scale_idx, indices in enumerate(self.precomputed_grids):
+        precomputed_grids = self.precomputed_grids.to(device)
+        for scale_idx, indices in enumerate(precomputed_grids):
             grid_size_int = indices.shape[0]
 
             # Extract grid point values (batch, grid_size_int)
