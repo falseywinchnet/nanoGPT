@@ -67,114 +67,6 @@ class CausalSelfAttention(nn.Module):
         return y
 
 
-
-class ITD_Linear(nn.Module):
-    def __init__(self, input_dim, output_dim, input_length, use_bias=True):
-        super(ITD_Linear, self).__init__()
-        self.input_length = input_length
-        self.output_dim = output_dim
-        self.use_bias = use_bias
-
-        if use_bias:
-            self.bias = nn.Parameter(torch.zeros((output_dim, 1), dtype=torch.float32))
-        else:
-            self.register_parameter('bias', None)
-
-        positions = torch.arange(input_length, dtype=torch.float32)
-        self.register_buffer('positions', positions)
-
-        # Instead of storing tensors in lists, we store the names of the buffers.
-        self.grid_names = []
-        self.basis_names = []
-
-        scales = torch.linspace(2, input_length // 2, output_dim)
-        for grid_size in scales:
-            grid_size_int = int(grid_size.item())
-            indices = torch.linspace(0, input_length - 1, grid_size_int).long()
-
-            grid_name = f'grid_{grid_size_int}'
-            self.register_buffer(grid_name, indices)
-            self.grid_names.append(grid_name)
-
-            scale_factor = (grid_size_int - 1) / (input_length - 1)
-            seg_idx = (positions * scale_factor).long().clamp(0, grid_size_int - 2)
-
-            x_grid = indices.to(torch.float32)
-            grid_start = x_grid[seg_idx]
-            grid_end = x_grid[seg_idx + 1]
-            delta = grid_end - grid_start + 1e-12  # Avoid division by zero
-            t = (positions - grid_start) / delta
-
-            t2 = t * t
-            t3 = t2 * t
-            h00 = 2 * t3 - 3 * t2 + 1
-            h10 = t3 - 2 * t2 + t
-            h01 = -2 * t3 + 3 * t2
-            h11 = t3 - t2
-
-            basis = torch.stack([h00, h10, h01, h11], dim=0)  # shape: (4, L)
-            basis_name = f'basis_{grid_size_int}'
-            self.register_buffer(basis_name, basis)
-            self.basis_names.append(basis_name)
-
-    def forward(self, x):
-        batch, L, _ = x.shape
-        outputs = []
-
-        # Iterate over each scale using the stored buffer names.
-        for scale_idx, (grid_name, basis_name) in enumerate(zip(self.grid_names, self.basis_names)):
-            grid = getattr(self, grid_name)
-            basis = getattr(self, basis_name)
-            grid_size_int = grid.shape[0]
-
-            # Extract grid point values (batch, grid_size_int)
-            ext_vals = x[:, grid, 0]
-            # Compute finite differences between adjacent grid points
-            d = (ext_vals[:, 1:] - ext_vals[:, :-1]) / (grid[1:] - grid[:-1] + 1e-12)
-
-            m = torch.zeros((batch, grid_size_int), device=x.device, dtype=x.dtype)
-            m[:, [0, 1, -2, -1]] = d[:, [0, 0, -1, -1]]
-
-            if grid_size_int > 3:
-                i_range = torch.arange(2, grid_size_int - 2, device=x.device)
-                d_im2 = d[:, i_range - 2]
-                d_im1 = d[:, i_range - 1]
-                d_i   = d[:, i_range]
-                d_ip1 = d[:, i_range + 1]
-                w1, w2 = (d_ip1 - d_i).abs(), (d_im1 - d_im2).abs()
-                denom = w1 + w2 + 1e-12
-                m[:, i_range] = torch.where(denom >= 1e-6, 
-                                            (w1 * d_im1 + w2 * d_i) / (denom + 1e-12),
-                                            0.5 * (d_im1 + d_i))
-
-            # Unpack the precomputed basis functions
-            h00, h10, h01, h11 = basis
-
-            scale_factor = (grid_size_int - 1) / (L - 1)
-            seg_idx = (self.positions * scale_factor).long().clamp(0, grid_size_int - 2)
-
-            seg_idx_exp = seg_idx.unsqueeze(0).expand(batch, -1)
-            seg_idx_plus = (seg_idx + 1).unsqueeze(0).expand(batch, -1)
-
-            y0 = torch.gather(ext_vals, 1, seg_idx_exp)
-            y1 = torch.gather(ext_vals, 1, seg_idx_plus)
-            m0 = torch.gather(m, 1, seg_idx_exp)
-            m1 = torch.gather(m, 1, seg_idx_plus)
-
-            delta = (grid[1] - grid[0]).unsqueeze(0).expand(batch, L)
-            baseline = h00 * y0 + h10 * m0 * delta + h01 * y1 + h11 * m1 * delta
-
-            if self.bias is not None:
-                baseline += self.bias[scale_idx]
-
-            outputs.append(baseline.unsqueeze(1))  # (batch, 1, L) for each scale
-
-        result = torch.cat(outputs, dim=1)  # (batch, output_dim, L)
-        return result
-
-import torch
-import torch.nn as nn
-
 class RainstarActivation(nn.Module):
     def __init__(self, gammaval=8):
         super().__init__()
@@ -183,88 +75,166 @@ class RainstarActivation(nn.Module):
        pos =  x -  x/(1+torch.abs(x))
        return (neg *torch.sigmoid(-x)) + (pos * torch.sigmoid(x)) +1
         
-# FFTAttentionWithITD uses the ITD layer as a nonlinear filter in the frequency domain.
+
 class FFTAttentionWithITD(nn.Module):
-    def __init__(self, n_embd, block_size, itd_output_dim, hidden_dim, use_bias=True):
+    def __init__(self, config, blocking_percent=50, hidden_dim=None):
         """
-        n_embd: embedding dimension (number of channels)
-        block_size: context length (T)
-        itd_output_dim: output dimension of the ITD filter (e.g. 4)
-        hidden_dim: hidden dimension for the weight MLP
-        use_bias: whether ITD uses a bias term
+        A drop-in replacement for causal self-attention using an FFT-based mechanism
+        with an inline ITD-style nonlinear filter.
+
+        The parameter 'blocking_percent' (valid roughly from 50 to 90) sets the effective
+        low-pass behavior. For example, blocking_percent=50 means we compute a grid over roughly
+        50% of the FFT bins (i.e. cutoff at half–Nyquist), while 90 means a very aggressive filter.
+        
+        config: an object with attributes:
+            - config.n_embd (embedding dimension)
+            - config.block_size (sequence length)
+            - config.bias (bool, use bias in linear layers)
+        hidden_dim: hidden dimension for the weight MLP; if None, defaults to config.n_embd.
         """
         super().__init__()
-        self.n_embd = n_embd
-        self.block_size = block_size
-        # For a real input, rFFT produces T_fft = block_size//2 + 1 frequency bins.
-        self.T_fft = block_size // 2 + 1
+        self.n_embd = config.n_embd
+        self.block_size = config.block_size
+        if hidden_dim is None:
+            hidden_dim = config.n_embd
 
-        # ITD layer (acts as a nonlinear filtering mechanism)
-        self.itd = ITD_Linear(input_dim=1, output_dim=itd_output_dim, input_length=self.T_fft, use_bias=use_bias)
-        
-        # MLP to compute per-frequency weights from the input embeddings.
-        # It maps a global context vector (per channel) to a weight tensor of shape (T_fft * n_embd).
+        # For a real input, rFFT produces block_size//2 + 1 frequency bins.
+        self.T_fft = self.block_size // 2 + 1
+
+        # Compute grid size from blocking_percent:
+        # Lower blocking_percent means less aggressive filtering (more bins kept).
+        # We interpret blocking_percent=50 as grid_size ≈ 50% of T_fft, and blocking_percent=90 as ~10%.
+        ratio = (100 - blocking_percent) / 100.0  
+        self.desired_grid_size = max(2, int(self.T_fft * ratio))
+
+        # Precompute a grid using a sine-wave–based extrema approach.
+        # Generate a sine wave whose period equals the desired grid size.
+        frequency = 1.0 / self.desired_grid_size  # so that period = desired_grid_size
+        t = torch.arange(0, self.T_fft, dtype=torch.float)
+        sine_wave = torch.sin(2 * math.pi * frequency * t)
+        # Find local extrema (excluding endpoints) in a vectorized way.
+        if self.T_fft > 2:
+            prev = sine_wave[:-2]
+            curr = sine_wave[1:-1]
+            nxt = sine_wave[2:]
+            cond = ((curr > prev) & (curr > nxt)) | ((curr < prev) & (curr < nxt))
+            indices = torch.nonzero(cond).squeeze(1) + 1
+            indices = torch.cat([torch.tensor([0], dtype=torch.long), indices, torch.tensor([self.T_fft - 1], dtype=torch.long)])
+        else:
+            indices = torch.arange(self.T_fft, dtype=torch.long)
+        # Downsample uniformly if too many indices:
+        if indices.numel() > self.desired_grid_size:
+            lin = torch.linspace(0, indices.numel() - 1, self.desired_grid_size).long()
+            indices = indices[lin]
+        self.register_buffer("itd_grid", indices)  # 1D tensor of grid indices
+
+        # Weight generation: global context (mean over time) is mapped via an MLP to produce
+        # one weight per FFT bin per channel.
         self.weight_mlp = nn.Sequential(
-            nn.Linear(n_embd, hidden_dim),
-            RainstarActivation(),
-            nn.Linear(hidden_dim, self.T_fft * n_embd)
+            nn.Linear(self.n_embd, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, self.T_fft * self.n_embd)
         )
-        # Learnable constant bias added to the weights.
-        self.weight_bias = nn.Parameter(torch.zeros(self.T_fft * n_embd))
+        self.weight_bias = nn.Parameter(torch.zeros(self.T_fft * self.n_embd))
         
-        # Projection layer to map the final result back to the embedding dimension.
-        self.proj = nn.Linear(n_embd, n_embd)
+        # Final projection mapping back to n_embd.
+        self.proj = nn.Linear(self.n_embd, self.n_embd)
     
+    def _inline_itd(self, m, grid):
+        """
+        Applies the ITD process to a 1D real signal m.
+        m: tensor of shape (N, L) where L == self.T_fft.
+        grid: 1D tensor of indices (precomputed).
+        Returns: baseline of shape (N, L), computed via cubic Hermite interpolation.
+        """
+        N, L = m.shape
+        grid = grid.to(m.device)
+        grid_size = grid.shape[0]
+        # Sample the signal at the grid indices.
+        ext_vals = m[:, grid]  # (N, grid_size)
+        # Compute finite differences.
+        d = (ext_vals[:, 1:] - ext_vals[:, :-1]) / ( (grid[1:] - grid[:-1]).float() + 1e-12 )
+        m_deriv = torch.zeros_like(ext_vals)
+        m_deriv[:, [0, 1, -2, -1]] = d[:, [0, 0, -1, -1]]
+        if grid_size > 3:
+            i_range = torch.arange(2, grid_size - 2, device=m.device)
+            d_im2 = d[:, i_range - 2]
+            d_im1 = d[:, i_range - 1]
+            d_i   = d[:, i_range]
+            d_ip1 = d[:, i_range + 1]
+            w1 = (d_ip1 - d_i).abs()
+            w2 = (d_im1 - d_im2).abs()
+            denom = w1 + w2 + 1e-12
+            m_deriv[:, i_range] = torch.where(denom >= 1e-6,
+                                              (w1 * d_im1 + w2 * d_i) / (denom + 1e-12),
+                                              0.5 * (d_im1 + d_i))
+        # Cubic Hermite interpolation from grid back to full resolution.
+        positions = torch.arange(L, dtype=torch.float32, device=m.device)  # positions 0...L-1
+        scale_factor = (grid_size - 1) / (L - 1)
+        seg_idx = (positions * scale_factor).long().clamp(0, grid_size - 2)  # (L,)
+        t = (positions * scale_factor - seg_idx.float()).unsqueeze(0).expand(N, -1)  # (N, L)
+        h00 = 2 * t**3 - 3 * t**2 + 1
+        h10 = t**3 - 2 * t**2 + t
+        h01 = -2 * t**3 + 3 * t**2
+        h11 = t**3 - t**2
+        seg_idx_exp = seg_idx.unsqueeze(0).expand(N, -1)
+        seg_idx_plus = (seg_idx + 1).unsqueeze(0).expand(N, -1)
+        y0 = torch.gather(ext_vals, 1, seg_idx_exp)
+        y1 = torch.gather(ext_vals, 1, seg_idx_plus)
+        m0 = torch.gather(m_deriv, 1, seg_idx_exp)
+        m1 = torch.gather(m_deriv, 1, seg_idx_plus)
+        # Assume delta is constant; use the difference between the first two grid indices.
+        delta = (grid[1] - grid[0]).float()
+        baseline = h00 * y0 + h10 * m0 * delta + h01 * y1 + h11 * m1 * delta  # (N, L)
+        return baseline
+
     def forward(self, x):
         """
-        x: Input embeddings of shape (B, T, C) where
-           B = batch size, T = context length, C = n_embd.
+        x: Input embeddings of shape (B, T, C), where
+           B = batch size, T = sequence length (should equal config.block_size), C = n_embd.
         """
-        B, T, C = x.shape
-        
-        # --- FFT Step ---
-        # Apply the FFT along the sequence (time) dimension.
-        # Using torch.fft.rfft yields a complex tensor of shape (B, T_fft, C)
+        B, T, C = x.shape  # T == block_size, C == n_embd
+
+        # --- FFT Transformation ---
+        # Compute rFFT along the time dimension: (B, T_fft, C)
         x_fft = torch.fft.rfft(x, dim=1)
-        
-        # Separate into magnitude and phase.
+        # Extract magnitude and the original real and imaginary parts.
         mag = x_fft.abs()       # (B, T_fft, C)
-        phase = x_fft.angle()   # (B, T_fft, C)
+        re = x_fft.real         # (B, T_fft, C)
+        im = x_fft.imag         # (B, T_fft, C)
         
         # --- Weight Generation ---
-        # Compute a global context per channel (average over time)
-        ctx = x.mean(dim=1)     # shape: (B, C)
-        # Pass through the MLP to get raw weights (shape: (B, T_fft * C))
-        weight_raw = self.weight_mlp(ctx)
-        # Add the learnable bias.
-        weight_raw = weight_raw + self.weight_bias
-        # Reshape to (B, T_fft, C) so that there is one weight per frequency bin and per channel.
-        weights = weight_raw.view(B, self.T_fft, C)
-        
-        # --- Frequency-Domain Multiplication ---
-        # Multiply the FFT magnitudes elementwise by the computed weights.
+        ctx = x.mean(dim=1)     # (B, C)
+        weight_raw = self.weight_mlp(ctx) + self.weight_bias  # (B, T_fft * C)
+        weights = weight_raw.view(B, self.T_fft, C)  # (B, T_fft, C)
         weighted_mag = mag * weights  # (B, T_fft, C)
+
+        # --- Apply Inline ITD ---
+        # Process each channel independently: reshape to (B * C, T_fft)
+        wc = weighted_mag.permute(0, 2, 1).reshape(B * C, self.T_fft)
+        baseline = self._inline_itd(wc, self.itd_grid)  # (B * C, T_fft)
+        baseline = baseline.view(B, C, self.T_fft).permute(0, 2, 1)  # (B, T_fft, C)
         
-        # --- Nonlinear Filtering via ITD ---
-        # Our ITD layer expects inputs of shape (B, L, 1), so process each channel independently.
-        # Rearrange from (B, T_fft, C) to (B * C, T_fft, 1)
-        weighted_mag = weighted_mag.permute(0, 2, 1).reshape(B * C, self.T_fft, 1)
-        # Apply the ITD layer.
-        itd_out = self.itd(weighted_mag)  # (B * C, itd_output_dim, T_fft)
-        # Aggregate across the ITD output dimension (for example, by averaging).
-        filtered_mag = itd_out.mean(dim=1)  # (B * C, T_fft)
-        # Reshape back to (B, T_fft, C)
-        filtered_mag = filtered_mag.view(B, C, self.T_fft).permute(0, 2, 1)
+        # --- Compute Adjustment ---
+        # Compute the per-bin adjustment needed so that the magnitude becomes the ITD baseline.
+        # (We compare the baseline (desired magnitude) to the weighted magnitude.)
+        eps = 1e-12
+        adjustment = (baseline - weighted_mag) / (weighted_mag + eps)  # (B, T_fft, C)
+        # Define phase adjustment (a small fraction of the adjustment) and amplitude adjustment.
+        phase_adj = 0.1 * adjustment
+        amp = adjustment
+
+        # --- Adjust the Complex FFT Coefficients ---
+        new_re = (re + phase_adj * im) * (1 + amp)
+        new_im = (im + phase_adj * re) * (1 - amp)
+        # Form the new complex tensor.
+        x_fft_adjusted = torch.complex(new_re, new_im)
         
         # --- Reconstruction ---
-        # Reconstruct the complex FFT representation using the filtered magnitude and original phase.
-        x_fft_filtered = torch.polar(filtered_mag, phase)
-        # Apply the inverse FFT to get back to the time domain.
-        x_ifft = torch.fft.irfft(x_fft_filtered, n=T, dim=1)  # (B, T, C)
-        
-        # Optionally project the result back to the original embedding dimension.
+        x_ifft = torch.fft.irfft(x_fft_adjusted, n=T, dim=1)  # (B, T, C)
         out = self.proj(x_ifft)  # (B, T, C)
         return out
+
 
 
 class MLP(nn.Module):
