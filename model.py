@@ -77,7 +77,7 @@ class RainstarActivation(nn.Module):
         
 
 class FFTAttentionWithITD(nn.Module):
-    def __init__(self, config, blocking_percent=50, hidden_dim=None):
+    def __init__(self, config, blocking_percent=75, hidden_dim=None):
         """
         A drop-in replacement for causal self-attention using an FFT-based mechanism
         with an inline ITD-style nonlinear filter.
