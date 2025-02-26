@@ -172,34 +172,99 @@ class ITD_Linear(nn.Module):
         result = torch.cat(outputs, dim=1)  # (batch, output_dim, L)
         return result
 
-class ITDWrapper(nn.Module):
-    """
-    Wraps ITD_Linear to apply it independently to each feature.
-    Now, instead of mirroring a single-scale output across four channels,
-    we directly output four distinct scales per feature.
-    """
-    def __init__(self, in_features, out_features, input_length, bias=False):
-        super().__init__()
-        # Ensure out_features is exactly 4 times in_features.
-        assert out_features == 4 * in_features, "ITDWrapper expects out_features to equal 4 * in_features"
-        self.expansion_factor = 4
-        # Instantiate ITD_Linear with output_dim=4 for four distinct scales.
-        self.itd = ITD_Linear(input_dim=1, output_dim=self.expansion_factor, input_length=input_length, use_bias=bias)
+import torch
+import torch.nn as nn
 
+class RainstarActivation(nn.Module):
+    def __init__(self, gammaval=8):
+        super().__init__()
     def forward(self, x):
-        # x: (B, L, in_features)
-        B, L, in_features = x.shape
-        # Process each feature independently: reshape to (B*in_features, L, 1)
-        x_reshaped = x.transpose(1, 2).reshape(B * in_features, L, 1)
-        # Apply ITD_Linear: output shape (B*in_features, 4, L)
-        y = self.itd(x_reshaped)
-        # Reshape back to (B, in_features, 4, L)
-        y = y.reshape(B, in_features, self.expansion_factor, L)
-        # Permute to (B, L, in_features, 4)
-        y = y.permute(0, 3, 1, 2)
-        # Merge the last two dimensions to get (B, L, 4*in_features)
-        y = y.reshape(B, L, in_features * self.expansion_factor)
-        return y
+       neg =  nn.SiLU()(x) * (x*torch.sigmoid(x)) + x/(1+torch.abs(x))
+       pos =  x -  x/(1+torch.abs(x))
+       return (neg *torch.sigmoid(-x)) + (pos * torch.sigmoid(x)) +1
+        
+# FFTAttentionWithITD uses the ITD layer as a nonlinear filter in the frequency domain.
+class FFTAttentionWithITD(nn.Module):
+    def __init__(self, n_embd, block_size, itd_output_dim, hidden_dim, use_bias=True):
+        """
+        n_embd: embedding dimension (number of channels)
+        block_size: context length (T)
+        itd_output_dim: output dimension of the ITD filter (e.g. 4)
+        hidden_dim: hidden dimension for the weight MLP
+        use_bias: whether ITD uses a bias term
+        """
+        super().__init__()
+        self.n_embd = n_embd
+        self.block_size = block_size
+        # For a real input, rFFT produces T_fft = block_size//2 + 1 frequency bins.
+        self.T_fft = block_size // 2 + 1
+
+        # ITD layer (acts as a nonlinear filtering mechanism)
+        self.itd = ITD_Linear(input_dim=1, output_dim=itd_output_dim, input_length=self.T_fft, use_bias=use_bias)
+        
+        # MLP to compute per-frequency weights from the input embeddings.
+        # It maps a global context vector (per channel) to a weight tensor of shape (T_fft * n_embd).
+        self.weight_mlp = nn.Sequential(
+            nn.Linear(n_embd, hidden_dim),
+            RainstarActivation(),
+            nn.Linear(hidden_dim, self.T_fft * n_embd)
+        )
+        # Learnable constant bias added to the weights.
+        self.weight_bias = nn.Parameter(torch.zeros(self.T_fft * n_embd))
+        
+        # Projection layer to map the final result back to the embedding dimension.
+        self.proj = nn.Linear(n_embd, n_embd)
+    
+    def forward(self, x):
+        """
+        x: Input embeddings of shape (B, T, C) where
+           B = batch size, T = context length, C = n_embd.
+        """
+        B, T, C = x.shape
+        
+        # --- FFT Step ---
+        # Apply the FFT along the sequence (time) dimension.
+        # Using torch.fft.rfft yields a complex tensor of shape (B, T_fft, C)
+        x_fft = torch.fft.rfft(x, dim=1)
+        
+        # Separate into magnitude and phase.
+        mag = x_fft.abs()       # (B, T_fft, C)
+        phase = x_fft.angle()   # (B, T_fft, C)
+        
+        # --- Weight Generation ---
+        # Compute a global context per channel (average over time)
+        ctx = x.mean(dim=1)     # shape: (B, C)
+        # Pass through the MLP to get raw weights (shape: (B, T_fft * C))
+        weight_raw = self.weight_mlp(ctx)
+        # Add the learnable bias.
+        weight_raw = weight_raw + self.weight_bias
+        # Reshape to (B, T_fft, C) so that there is one weight per frequency bin and per channel.
+        weights = weight_raw.view(B, self.T_fft, C)
+        
+        # --- Frequency-Domain Multiplication ---
+        # Multiply the FFT magnitudes elementwise by the computed weights.
+        weighted_mag = mag * weights  # (B, T_fft, C)
+        
+        # --- Nonlinear Filtering via ITD ---
+        # Our ITD layer expects inputs of shape (B, L, 1), so process each channel independently.
+        # Rearrange from (B, T_fft, C) to (B * C, T_fft, 1)
+        weighted_mag = weighted_mag.permute(0, 2, 1).reshape(B * C, self.T_fft, 1)
+        # Apply the ITD layer.
+        itd_out = self.itd(weighted_mag)  # (B * C, itd_output_dim, T_fft)
+        # Aggregate across the ITD output dimension (for example, by averaging).
+        filtered_mag = itd_out.mean(dim=1)  # (B * C, T_fft)
+        # Reshape back to (B, T_fft, C)
+        filtered_mag = filtered_mag.view(B, C, self.T_fft).permute(0, 2, 1)
+        
+        # --- Reconstruction ---
+        # Reconstruct the complex FFT representation using the filtered magnitude and original phase.
+        x_fft_filtered = torch.polar(filtered_mag, phase)
+        # Apply the inverse FFT to get back to the time domain.
+        x_ifft = torch.fft.irfft(x_fft_filtered, n=T, dim=1)  # (B, T, C)
+        
+        # Optionally project the result back to the original embedding dimension.
+        out = self.proj(x_ifft)  # (B, T, C)
+        return out
 
 
 class MLP(nn.Module):
@@ -207,7 +272,7 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu    = nn.GELU()
+        self.gelu    = RainstarActivation()
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -223,7 +288,7 @@ class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
+        self.attn = FFTAttentionWithITD(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
@@ -261,14 +326,6 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # weight tying: share the weights between the token embedding and the final output layer.
         self.transformer.wte.weight = self.lm_head.weight
-        
-        if config.use_itd:
-            # ITDWrapper produces an output of shape (B, t, 4*n_embd)
-            self.itd_embedding = ITDWrapper(config.n_embd, 4 * config.n_embd, config.block_size, bias=config.bias)
-            self.itd_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
-        else:
-            self.itd_embedding = None
-            self.itd_proj = None
             
 
         # init all weights
@@ -311,9 +368,6 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos)    # position embeddings of shape (t, n_embd)
         x = tok_emb + pos_emb
-        if self.config.use_itd:
-            x_enhanced = self.itd_proj(self.itd_embedding(x))  # (B, t, n_embd)
-            x = x + x_enhanced
                     
         x = self.transformer.drop(x)
         for block in self.transformer.h:
