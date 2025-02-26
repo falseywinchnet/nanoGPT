@@ -70,8 +70,9 @@ class CausalSelfAttention(nn.Module):
 class RainstarActivation(nn.Module):
     def __init__(self, gammaval=8):
         super().__init__()
+        self.sil = nn.SiLU()
     def forward(self, x):
-       neg =  nn.SiLU()(x) * (x*torch.sigmoid(x)) + x/(1+torch.abs(x))
+       neg =  self.sil(x) * (x*torch.sigmoid(x)) + x/(1+torch.abs(x))
        pos =  x -  x/(1+torch.abs(x))
        return (neg *torch.sigmoid(-x)) + (pos * torch.sigmoid(x)) +1
 
