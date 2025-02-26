@@ -132,7 +132,7 @@ class FFTAttentionWithITD(nn.Module):
         # one weight per FFT bin per channel.
         self.weight_mlp = nn.Sequential(
             nn.Linear(self.n_embd, hidden_dim),
-            nn.ReLU(),
+            RainstarActivation(),
             nn.Linear(hidden_dim, self.T_fft * self.n_embd)
         )
         self.weight_bias = nn.Parameter(torch.zeros(self.T_fft * self.n_embd))
@@ -208,28 +208,23 @@ class FFTAttentionWithITD(nn.Module):
         weight_raw = self.weight_mlp(ctx) + self.weight_bias  # (B, T_fft * C)
         weights = weight_raw.view(B, self.T_fft, C)  # (B, T_fft, C)
         weighted_mag = mag * weights  # (B, T_fft, C)
-
-        # --- Apply Inline ITD ---
-        # Process each channel independently: reshape to (B * C, T_fft)
-        wc = weighted_mag.permute(0, 2, 1).reshape(B * C, self.T_fft)
-        baseline = self._inline_itd(wc, self.itd_grid)  # (B * C, T_fft)
-        baseline = baseline.view(B, C, self.T_fft).permute(0, 2, 1)  # (B, T_fft, C)
-        
-        # --- Compute Adjustment ---
-        # Compute the per-bin adjustment needed so that the magnitude becomes the ITD baseline.
-        # (We compare the baseline (desired magnitude) to the weighted magnitude.)
         eps = 1e-12
-        adjustment = (baseline - weighted_mag) / (weighted_mag + eps)  # (B, T_fft, C)
-        # Define phase adjustment (a small fraction of the adjustment) and amplitude adjustment.
-        phase_adj = 0.1 * adjustment
-        amp = adjustment
-
-        # --- Adjust the Complex FFT Coefficients ---
-        new_re = (re + phase_adj * im) * (1 + amp)
-        new_im = (im + phase_adj * re) * (1 - amp)
-        # Form the new complex tensor.
-        x_fft_adjusted = torch.complex(new_re, new_im)
+        # m: original magnitude, m_target: weighted target magnitude
+        m = mag  # computed as torch.sqrt(re**2 + im**2)
+        m_target = weighted_mag
         
+        # Compute s per bin (shape: [B, T_fft, C])
+        s = m_target / (m + eps)
+        
+        # Compute p per bin (balanced nonzero correction)
+        p = -4 * (re * im) / (m**2 + eps)
+        
+        # Apply the two-part adjustment:
+        new_re = (re + p * im) * s
+        new_im = (im + p * re) * s
+        
+        x_fft_adjusted = torch.complex(new_re, new_im)
+        # Form the new complex tensor.        
         # --- Reconstruction ---
         x_ifft = torch.fft.irfft(x_fft_adjusted, n=T, dim=1)  # (B, T, C)
         out = self.proj(x_ifft)  # (B, T, C)
