@@ -136,6 +136,7 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     use_itd: bool = False  # If True, replace the first layer in the MLP with the ITD layer
+    return_features: bool = False  # New flag to return hidden representations
 
 class GPT(nn.Module):
 
@@ -202,6 +203,8 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
+        if return_features or self.config.return_features:
+            return x  # Returning the extracted feature embeddings
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
