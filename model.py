@@ -41,30 +41,50 @@ class CausalSelfAttention(nn.Module):
                                         .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
-        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
+        B, T, C = x.size()  
 
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        # Compute Q, K, V for all heads in batch
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
 
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        # Reshape into multi-head format
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  
+
+        # Generate Gaussian noise per head
+        noise = torch.randn_like(q) * 0.1  # Small variance perturbation
+
+        # Two perturbations: (+η) and (-η)
+        q_pos, k_pos, v_pos = q + noise, k + noise, v + noise
+        q_neg, k_neg, v_neg = q - noise, k - noise, v - noise
+
+        # Compute attention twice
         if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            att_pos = torch.nn.functional.scaled_dot_product_attention(q_pos, k_pos, v_pos, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            att_neg = torch.nn.functional.scaled_dot_product_attention(q_neg, k_neg, v_neg, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
-            # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
+            att_pos = (q_pos @ k_pos.transpose(-2, -1)) * (1.0 / math.sqrt(k_pos.size(-1)))
+            att_pos = att_pos.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            att_pos = F.softmax(att_pos, dim=-1)
+            att_pos = self.attn_dropout(att_pos)
+            att_pos = att_pos @ v_pos
 
-        # output projection
+            att_neg = (q_neg @ k_neg.transpose(-2, -1)) * (1.0 / math.sqrt(k_neg.size(-1)))
+            att_neg = att_neg.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            att_neg = F.softmax(att_neg, dim=-1)
+            att_neg = self.attn_dropout(att_neg)
+            att_neg = att_neg @ v_neg
+
+        # Average both attention outputs to cancel noise influence
+        y = (att_pos + att_neg) / 2  
+
+        # Reshape back to standard format
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+
+        # Output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
+
 
 
 class RainstarActivation(nn.Module):
