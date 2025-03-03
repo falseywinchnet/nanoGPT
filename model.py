@@ -78,7 +78,7 @@ class CausalSelfAttention(nn.Module):
 
         if self.use_rope and rope_freqs is not None:
             self.rope_freqs = rope_freqs
-             q, k = self.apply_rope(q, k)
+            q, k = self.apply_rope(q, k)
         
         # Two perturbations: (+η) and (-η)
         q_pos, k_pos, v_pos = q + noise, k + noise, v + noise
