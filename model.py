@@ -162,8 +162,8 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     return_features: bool = False  # New flag to return hidden representations
-    self.use_rope: bool = False
-    self.noise_alpha: float = 0.1
+    self.use_rope: bool = True
+    self.noise_alpha: float = 0.5
 
 class GPT(nn.Module):
 
