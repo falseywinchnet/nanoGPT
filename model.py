@@ -17,6 +17,8 @@ class LayerNorm(nn.Module):
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
+
+
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -34,13 +36,32 @@ class CausalSelfAttention(nn.Module):
         self.dropout = config.dropout
         # flash attention makes GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        self.use_rope = config.use_rope
+        self.noise_alpha = config.noise_alpha
+        
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
+            
 
-    def forward(self, x):
+        
+    def apply_rope(self, q, k):
+            """Applies RoPE to queries and keys"""
+            B, H, S, D = q.shape
+            rope_freqs = self.rope_freqs.to(q.device, q.dtype)
+            positions = torch.arange(S, device=q.device, dtype=q.dtype).unsqueeze(1)
+            theta = positions * rope_freqs.unsqueeze(0)
+            sin_theta, cos_theta = theta.sin(), theta.cos()
+            sin_theta, cos_theta = sin_theta.expand(B, H, S, D//2), cos_theta.expand(B, H, S, D//2)
+            q1, q2 = q[..., 0::2], q[..., 1::2]
+            k1, k2 = k[..., 0::2], k[..., 1::2]
+            q = torch.cat([q1 * cos_theta - q2 * sin_theta, q1 * sin_theta + q2 * cos_theta], dim=-1)
+            k = torch.cat([k1 * cos_theta - k2 * sin_theta, k1 * sin_theta + k2 * cos_theta], dim=-1)
+            return q, k
+        
+    def forward(self, x,rope_freqs=None):
         B, T, C = x.size()  
 
         # Compute Q, K, V for all heads in batch
@@ -52,8 +73,13 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  
 
         # Generate Gaussian noise per head
-        noise = torch.randn_like(q) * 0.1  # Small variance perturbation
+        
+        noise = torch.randn_like(q) *self.noise_alpha # Small variance perturbation
 
+        if self.use_rope and rope_freqs is not None:
+            self.rope_freqs = rope_freqs
+             q, k = self.apply_rope(q, k)
+        
         # Two perturbations: (+η) and (-η)
         q_pos, k_pos, v_pos = q + noise, k + noise, v + noise
         q_neg, k_neg, v_neg = q - noise, k - noise, v - noise
@@ -121,8 +147,8 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x,rope_freqs):
+        x = x + self.attn(self.ln_1(x),rope_freqs)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -135,8 +161,9 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-    use_itd: bool = False  # If True, replace the first layer in the MLP with the ITD layer
     return_features: bool = False  # New flag to return hidden representations
+    self.use_rope: bool = False
+    self.noise_alpha: float = 0.1
 
 class GPT(nn.Module):
 
@@ -156,7 +183,9 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # weight tying: share the weights between the token embedding and the final output layer.
         self.transformer.wte.weight = self.lm_head.weight
-            
+        self.register_buffer("rope_freqs",self._build_rope_frequencies(config.n_embd)) if config.use_rope     
+        if not config.use_rope:
+            self.rope_freqs = None
 
         # init all weights
         self.apply(self._init_weights)
@@ -180,6 +209,11 @@ class GPT(nn.Module):
             n_params -= self.transformer.wpe.weight.numel()
         return n_params
 
+    def _build_rope_frequencies(self, embed_dim):
+        """Compute inverse frequency tensor for RoPE"""
+        half_dim = embed_dim // 2
+        return 1.0 / (10000 ** (torch.arange(0, half_dim, dtype=torch.float32) / half_dim))
+        
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -201,7 +235,7 @@ class GPT(nn.Module):
                     
         x = self.transformer.drop(x)
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x, rope_freqs= self.rope_freqs)
         x = self.transformer.ln_f(x)
         if return_features or self.config.return_features:
             return x  # Returning the extracted feature embeddings
