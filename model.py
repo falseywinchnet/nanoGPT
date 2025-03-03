@@ -154,12 +154,12 @@ class Block(nn.Module):
         
         x1 = x + self.attn(self.ln_1(x),rope_freqs)
         x1 = x + self.mlp(self.ln_2(x1))
-        x2 = x + self.mlp2(self.ln_2(x1))
-        x3 = x + self.mlp3(self.ln_2(x1))
-        a = torch.sigmoid(x1)
-        b = torch.sigmoid(x2)
+        x2 = x + self.mlp2(x)
+        x3 = x + self.mlp3(x)
+        a = torch.sigmoid(x2)
+        b = torch.sigmoid(x3)
         signal = 0.5 * (a + b - 2.0 * a * b)
-        x = x3 * signal #apply xor gaing
+        x = x1 * signal #apply xor gaing
         return x
 
 @dataclass
