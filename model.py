@@ -132,7 +132,7 @@ class MLP(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
-        a = self.c_fc(x)
+        x = self.c_fc(x)
         x = self.gelu(x)
         x = self.c_proj(x)
         x = self.dropout(x)
@@ -156,7 +156,7 @@ class Block(nn.Module):
         
         x1 = x + self.attn(self.ln_1(x),rope_freqs)
         x2 = x + self.attn2(self.ln_1(x),rope_freqs)
-        x3 = x + self.attn2(self.ln_1(x),rope_freqs)
+        x3 = x + self.attn3(self.ln_1(x),rope_freqs)
         x1 = x + self.mlp(self.ln_2(x1))
         x2 = x + self.mlp2(self.ln_2(x2))
         x3 = x + self.mlp3(self.ln_2(x3))
