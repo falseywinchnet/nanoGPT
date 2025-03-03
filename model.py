@@ -71,9 +71,7 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
          
-        if self.use_rope and rope_freqs is not None:
-            self.rope_freqs = rope_freqs
-            q, k = self.apply_rope(q, k)
+        q, k = self.apply_rope(q, k)
             
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
