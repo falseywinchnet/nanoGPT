@@ -127,8 +127,8 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.gelu    = RainstarActivation()
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=False) #KAN style
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
