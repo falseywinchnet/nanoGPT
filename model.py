@@ -126,24 +126,14 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc3 = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.c_fc2 = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.gelu    = RainstarActivation()
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=False) #KAN style
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         a = self.c_fc(x)
-        b = self.c_fc2(x)    
-        c = self.c_fc3(x)
-        a = torch.sigmoid(a)
-        b = torch.sigmoid(b)
-        signal = 0.5 * (a + b - 2.0 * a * b)
-        c = c * signal #apply xor gaing
         x = self.gelu(c)
-        
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
@@ -154,12 +144,30 @@ class Block(nn.Module):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
+        self.attn2 = CausalSelfAttention(config)
+        self.attn3 = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
+        self.mlp2 = MLP(config)
+        self.mlp3 = MLP(config)
 
+    
     def forward(self, x,rope_freqs):
-        x = x + self.attn(self.ln_1(x),rope_freqs)
-        x = x + self.mlp(self.ln_2(x))
+        a = torch.sigmoid(a)
+        b = torch.sigmoid(b)
+        signal = 0.5 * (a + b - 2.0 * a * b)
+        c = c * signal #apply xor gaing
+        
+        x1 = x + self.attn(self.ln_1(x),rope_freqs)
+        x2 = x + self.attn2(self.ln_1(x),rope_freqs)
+        x3 = x + self.attn2(self.ln_1(x),rope_freqs)
+        x1 = x + self.mlp(self.ln_2(x1))
+        x2 = x + self.mlp2(self.ln_2(x2))
+        x3 = x + self.mlp3(self.ln_2(x3))
+        a = torch.sigmoid(x1)
+        b = torch.sigmoid(x2)
+        signal = 0.5 * (a + b - 2.0 * a * b)
+        x = x3 * signal #apply xor gaing
         return x
 
 @dataclass
