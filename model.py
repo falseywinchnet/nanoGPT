@@ -144,22 +144,18 @@ class Block(nn.Module):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
+        self.attn2 = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
-        self.mlp2 = MLP(config)
-        self.mlp3 = MLP(config)
 
     
     def forward(self, x,rope_freqs):
         
-        x1 = x + self.attn(self.ln_1(x),rope_freqs)
-        x1 = x + self.mlp(self.ln_2(x1))
-        x2 = x + self.mlp2(x)
-        x3 = x + self.mlp3(x)
-        a = torch.sigmoid(x2)
-        b = torch.sigmoid(x3)
-        signal = 0.5 * (a + b - 2.0 * a * b)
-        x = x1 * signal #apply xor gaing
+        a = self.attn(self.ln_1(x),rope_freqs)
+        b = self.attn2(self.ln_1(x),rope_freqs)
+        x = x + 0.5 * (a + b - 2.0 * a * b)
+        x = x + self.mlp(self.ln_2(x))       
+        
         return x
 
 @dataclass
