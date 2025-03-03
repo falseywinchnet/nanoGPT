@@ -62,7 +62,7 @@ class CausalSelfAttention(nn.Module):
             return q, k
 
 
-     def forward_single(self, x):
+    def forward_single(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
