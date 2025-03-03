@@ -188,8 +188,8 @@ class Block(nn.Module):
     
     def forward(self, x,rope_freqs):
         
-        a = self.ln3(self.attn(self.ln_1(x),rope_freqs))
-        b = self.ln2(self.attn2(self.ln_1(x)))
+        a = self.ln_2(self.attn(self.ln_1(x),rope_freqs))
+        b = self.ln_3(self.attn2(self.ln_1(x)))
         
         x = x + 0.5 * (a + b - 2.0 * a * b)
         x = x + self.mlp(self.ln_4(x))       
