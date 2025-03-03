@@ -153,10 +153,6 @@ class Block(nn.Module):
 
     
     def forward(self, x,rope_freqs):
-        a = torch.sigmoid(a)
-        b = torch.sigmoid(b)
-        signal = 0.5 * (a + b - 2.0 * a * b)
-        c = c * signal #apply xor gaing
         
         x1 = x + self.attn(self.ln_1(x),rope_freqs)
         x2 = x + self.attn2(self.ln_1(x),rope_freqs)
