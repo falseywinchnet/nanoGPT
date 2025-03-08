@@ -168,13 +168,11 @@ class Block(nn.Module):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.ln_3 = LayerNorm(config.n_embd, bias=config.bias)
-
         self.attn = CausalSelfAttention(config)
         self.mlp = MLP(config)
     
     def forward(self, x, x2, rope_freqs):
-        x = x + self.attn(self.ln_1(x), self.ln_3(x2), rope_freqs)
+        x = x + self.attn(self.ln_1(x), x2, rope_freqs)
         x = x + self.mlp(self.ln_2(x))       
         return x
         
