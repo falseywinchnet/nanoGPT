@@ -366,12 +366,19 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
         phase = self.compute_phase_embedding(tok_emb, pos_emb)  
 
-        x = tok_emb + pos_emb.unsqueeze(0) + phase
-        x = self.transformer.drop(x)
+        x = tok_emb + pos_emb.unsqueeze(0) 
 
+        dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
+        
+        # Step 2: Apply dropout mask to token embeddings (x) and later to phase embeddings
+        x = x * dropout_mask  
+        phase = phase * dropout_mask              
+        
         # Pass through each block
-        for block in self.transformer.h:
-            x = block(x, rope_freqs=self.rope_freqs)
+        for i, block in enumerate(self.transformer.h):
+            phi_weight = (i + 1) / len(self.transformer.h)  # Scale from 0% to 100%
+            x = block(x + phase * phi_weight, rope_freqs=self.rope_freqs)
+
         # Final layernorm
         x = self.transformer.ln_f(x)
         return x
