@@ -289,8 +289,8 @@ class GPT(nn.Module):
             Returns:
                 x2: Tensor of shape (B, T, C), the secondary embeddings.
             """
-            B, T, C = x.shape
-            device = x.device
+            B, T, C = tok_emb.shape
+            device = tok_emb.device
         
             # Define fixed frequencies per dimension (like standard RoPE frequencies).
             dims = torch.arange(C, device=device, dtype=torch.float32)  # (C,)
@@ -316,13 +316,13 @@ class GPT(nn.Module):
             backward_pos_emb = torch.sin(backward_offsets.unsqueeze(-1) * freqs.view(1, 1, C))
             
             # Combine them: for each pair (i,j), use the forward embedding if j>i, backward if j<i.
-            pos_emb_latent = forward_mask.unsqueeze(-1) * forward_pos_emb + backward_mask.unsqueeze(-1) * backward_pos_emb
+            phase_emb = forward_mask.unsqueeze(-1) * forward_pos_emb + backward_mask.unsqueeze(-1) * backward_pos_emb
             # For j == i, offset is 0 so sin(0)=0; effectively these contribute nothing.
         
             # Now, for each token position i (for each batch element), accumulate contributions from all j:
-            # φ[i, c] = sum_{j != i} [ pos_emb[i,j,c] * x[b,j,c] ]
-            # Using einsum: treat pos_emb as (T, T, C) and x as (B, T, C) so that we sum over j.
-            phi = torch.einsum('ijc,bjc->bic', x, pos_emb_latent)  # (B, T, C)
+            # φ[i, c] = sum_{j != i} [ phase_emb[i,j,c] * x[b,j,c] ]
+            # Using einsum: treat phase_emb as (T, T, C) and x as (B, T, C) so that we sum over j.
+            phi = torch.einsum('ijc,bjc->bic', tok_emb, phase_emb)  # (B, T, C)
             print(phi.shape,pos_emb_latent.shape)
             phi = phi / (T ** 0.5)
             phi = phi + pos_emb.unsqueeze(0)
