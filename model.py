@@ -365,9 +365,7 @@ class GPT(nn.Module):
         device = idx.device
         b, original_t = idx.shape
 
-        # If no refinement, just do the usual "one pass" forward that 
-        # returns last-position logits (or full-sequence if you prefer).
-            # ---- Normal single forward pass for the given sequence ----
+        # ---- Normal single forward pass for the given sequence ----
         x = self._run_transformer(idx)  # shape (b, t, n_embd)
         
         if return_features:
@@ -387,20 +385,12 @@ class GPT(nn.Module):
                 )
             return logits, loss
 
-        # ------------------------------------------------------------------
-        # If we do have refinement_steps>0, we expand the sequence 
-        # each time we append a "virtual token" (soft or straight-through).
-        # We'll always produce final shape (b, original_t, vocab_size)
-        # if not return_features, so it lines up with the original length.
-        # ------------------------------------------------------------------
-        
-
     # ------------------------------------------------------------------
     # Internal helper that runs the transformer stacks on a given 
     # index sequence. Optionally override the last token's embedding.
     # Also includes "secondary embeddings" if config.use_secondary_embed.
     # ------------------------------------------------------------------
-    def _run_transformer(self, idx, override_last_embed=None):
+    def _run_transformer(self, idx):
         """
         1) Convert idx -> embeddings
         2) If override_last_embed is not None, replace the last token's embedding
@@ -414,11 +404,6 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
         pos = torch.arange(t, dtype=torch.long, device=device)
         pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
-
-        # If we have an override for the last token's embedding
-        if override_last_embed is not None:
-            # override the final token's embedding 
-            tok_emb[:, -1, :] = override_last_embed.squeeze(1)
 
         x = tok_emb + pos_emb.unsqueeze(0)
         x = self.transformer.drop(x)
