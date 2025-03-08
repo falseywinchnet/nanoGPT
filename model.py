@@ -322,9 +322,9 @@ class GPT(nn.Module):
             # Now, for each token position i (for each batch element), accumulate contributions from all j:
             # φ[i, c] = sum_{j != i} [ pos_emb[i,j,c] * x[b,j,c] ]
             # Using einsum: treat pos_emb as (T, T, C) and x as (B, T, C) so that we sum over j.
-            phi = torch.einsum('ijc,bjc->bic', pos_emb, x)  # (B, T, C)
+            phi = torch.einsum('ijc,bjc->bic', x, x)  # (B, T, C)
             phi = phi / (T ** 0.5)
-            phi = phi + pos_emb
+            phi = phi + pos
             x2 = x + phi
             return x2
 
