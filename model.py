@@ -173,13 +173,15 @@ class GPT(nn.Module):
         self.config = config
         self.ln_x = LayerNorm(config.n_embd, bias=config.bias)
         self.ln_y = LayerNorm(config.n_embd, bias=config.bias)
-        self.ln_z = LayerNorm(config.n_embd, bias=config.bias)
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            prelude = nn.ModuleList([Block(config) for _ in range(1)]),
+            preludey = nn.ModuleList([Block(config) for _ in range(1)]),
+
+            coda = nn.ModuleList([Block(config) for _ in range(1)]),
             xh = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             yh = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
@@ -380,16 +382,21 @@ class GPT(nn.Module):
         # Step 2: Apply dropout mask to token embeddings (x) and later to phase embeddings
         x = x * dropout_mask  
         y = y * dropout_mask              
-        
+
+        for i, block in enumerate(self.transformer.prelude):
+            residual = block(x, rope_freqs=self.rope_freqs)  
+       
+        for i, block in enumerate(self.transformer.preludey):
+            residualy = block(y, rope_freqs=self.rope_freqs)  
+                 
         # Pass through each block
         for i, (xblock, yblock) in enumerate(zip(self.transformer.xh, self.transformer.yh)):
-            x = xblock(x, rope_freqs=self.rope_freqs)
-            y = yblock(y, rope_freqs=self.rope_freqs)
-        x = self.ln_x(x)
-        y = self.ln_y(y)
-        x = (x + y ) / 2
+            x = xblock(x+residual, rope_freqs=self.rope_freqs)
+            y = yblock(y+residualy, rope_freqs=self.rope_freqs)
+            x = x + self.ln_y(y) #integrate to each stage
 
-        for i, block in enumerate(self.transformer.h):
+                    
+        for i, block in enumerate(self.transformer.coda):
             x = block(x, rope_freqs=self.rope_freqs)       
 
         # Final layernorm
@@ -490,7 +497,7 @@ class GPT(nn.Module):
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
-        for _ in range(max_new_tokens):
+        for _ in range(max_new_tokens): 
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] / temperature
