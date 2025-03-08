@@ -470,7 +470,7 @@ class GPT(nn.Module):
 
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
-        pos = torch.arange(t, dtype=torch.long, device=device)
+        pos = torch.arange(t, dtype=torch.long, device=device) % self.config.block_size
         pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
 
         # If we have an override for the last token's embedding
