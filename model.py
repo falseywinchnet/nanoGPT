@@ -125,7 +125,7 @@ class CausalSelfAttention(nn.Module):
             
             # Combine primary + secondary stream
             y_secondary = att2  # shape (B, n_head, T, head_dim)
-            y = (y_primary *0.9 + y_secondary*0.1) / 2
+            y = (y_primary + y_secondary) / 2
         else:
             # No x2 => just use primary
             y = y_primary
