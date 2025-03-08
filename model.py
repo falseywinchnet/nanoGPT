@@ -323,7 +323,7 @@ class GPT(nn.Module):
             # φ[i, c] = sum_{j != i} [ phase_emb[i,j,c] * x[b,j,c] ]
             # Using einsum: treat phase_emb as (T, T, C) and x as (B, T, C) so that we sum over j.
             phi = torch.einsum('ijc,bjc->bic', tok_emb, phase_emb)  # (B, T, C)
-            print(phi.shape,pos_emb_latent.shape)
+            print(phi.shape,phase_emb.shape)
             phi = phi / (T ** 0.5)
             phi = phi + pos_emb.unsqueeze(0)
             x2 = tok_emb + phi
