@@ -20,90 +20,121 @@ class LayerNorm(nn.Module):
 
 
 class CausalSelfAttention(nn.Module):
-
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        # regularization
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
-        # flash attention makes GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        self.flash = hasattr(F, 'scaled_dot_product_attention')
         self.use_rope = config.use_rope
         self.noise_alpha = config.noise_alpha
         
+        # ---- Primary Q,K,V ----
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        # ---- Secondary Q,K,V if use_secondary_embed is enabled ----
+        if config.use_secondary_embed:
+            self.c_attn_2 = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        
+        # Output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        
+        # Dropouts
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+        
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
-            
 
-        
     def apply_rope(self, q, k):
-            """Applies RoPE to queries and keys"""
-            B, H, S, D = q.shape
-            rope_freqs = self.rope_freqs.to(q.device, q.dtype)
-            positions = torch.arange(S, device=q.device, dtype=q.dtype).unsqueeze(1)
-            theta = positions * rope_freqs.unsqueeze(0)
-            sin_theta, cos_theta = theta.sin(), theta.cos()
-            sin_theta, cos_theta = sin_theta.expand(B, H, S, D//2), cos_theta.expand(B, H, S, D//2)
-            q1, q2 = q[..., 0::2], q[..., 1::2]
-            k1, k2 = k[..., 0::2], k[..., 1::2]
-            q = torch.cat([q1 * cos_theta - q2 * sin_theta, q1 * sin_theta + q2 * cos_theta], dim=-1)
-            k = torch.cat([k1 * cos_theta - k2 * sin_theta, k1 * sin_theta + k2 * cos_theta], dim=-1)
-            return q, k
+        """Applies RoPE to queries and keys."""
+        B, H, S, D = q.shape
+        rope_freqs = self.rope_freqs.to(q.device, q.dtype)
+        positions = torch.arange(S, device=q.device, dtype=q.dtype).unsqueeze(1)
+        theta = positions * rope_freqs.unsqueeze(0)  # shape [S, D/2]
+        sin_theta, cos_theta = theta.sin(), theta.cos()
 
-    def forward(self, x,rope_freqs=None):
+        sin_theta = sin_theta.expand(B, H, S, D // 2)
+        cos_theta = cos_theta.expand(B, H, S, D // 2)
 
+        q1, q2 = q[..., 0::2], q[..., 1::2]
+        k1, k2 = k[..., 0::2], k[..., 1::2]
+        q = torch.cat([q1*cos_theta - q2*sin_theta, q1*sin_theta + q2*cos_theta], dim=-1)
+        k = torch.cat([k1*cos_theta - k2*sin_theta, k1*sin_theta + k2*cos_theta], dim=-1)
+        return q, k
+
+    def forward(self, x, rope_freqs=None, x2=None):
+        """
+        x:  (B, T, C) primary embeddings
+        x2: (B, T, C) secondary embeddings (if any)
+        """
+        B, T, C = x.size()
         
-        B, T, C = x.size()  
-
-        # Compute Q, K, V for all heads in batch
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-
-        # Reshape into multi-head format
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  
-
-        # Generate Gaussian noise per head
-        
-        noise = torch.randn_like(q) *self.noise_alpha # Small variance perturbation
-
-        if self.use_rope and rope_freqs is not None:
+        # Store rope freqs if provided
+        if rope_freqs is not None:
             self.rope_freqs = rope_freqs
-            q, k = self.apply_rope(q, k)
-            
-        # Two perturbations: (+η) and (-η)
-        v_pos =  v + noise
+
+        # ---- Primary pass Q,K,V ----
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+
+        noise = torch.randn_like(q) * self.noise_alpha
+        v_pos = v + noise
         v_neg = v - noise
 
-        # Compute attention twice
+        if self.use_rope and rope_freqs is not None:
+            q, k = self.apply_rope(q, k)
+
+        # Compute attention for the primary embedding
         if self.flash:
-            att_pos = torch.nn.functional.scaled_dot_product_attention(q, k, v_pos, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-            att_neg = torch.nn.functional.scaled_dot_product_attention(q, k, v_neg, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            att_pos = F.scaled_dot_product_attention(q, k, v_pos, attn_mask=None,
+                        dropout_p=self.dropout if self.training else 0, is_causal=True)
+            att_neg = F.scaled_dot_product_attention(q, k, v_neg, attn_mask=None,
+                        dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
-            att_pos = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att_pos = att_pos.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-            att_pos = F.softmax(att_pos, dim=-1)
-            att_pos = self.attn_dropout(att_pos)
-            att_pos = att_pos @ v_pos
-            att_neg = att_pos @ v_neg
+            att_scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att_scores = att_scores.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            att_probs = F.softmax(att_scores, dim=-1)
+            att_probs = self.attn_dropout(att_probs)
+            att_pos = att_probs @ v_pos
+            att_neg = att_probs @ v_neg
+        
+        y_primary = (att_pos + att_neg) / 2  # (B, n_head, T, head_dim)
 
-        # Average both attention outputs to cancel noise influence
-        y = (att_pos + att_neg) / 2  
+        # ---- Secondary pass if x2 is given ----
+        if (x2 is not None):
+            # c_attn_2 -> Q2,K2,V2
+            q2, k2, v2 = self.c_attn_2(x2).split(self.n_embd, dim=2)
+            q2 = q2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+            k2 = k2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+            v2 = v2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        # Reshape back to standard format
+            if self.use_rope and rope_freqs is not None:
+                q2, k2 = self.apply_rope(q2, k2)
+
+            if self.flash:
+                att2 = F.scaled_dot_product_attention(q2, k2, v2, attn_mask=None,
+                           dropout_p=self.dropout if self.training else 0, is_causal=True)
+            else:
+                att_scores2 = (q2 @ k2.transpose(-2, -1)) * (1.0 / math.sqrt(k2.size(-1)))
+                att_scores2 = att_scores2.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+                att_probs2 = F.softmax(att_scores2, dim=-1)
+                att_probs2 = self.attn_dropout(att_probs2)
+                att2 = att_probs2 @ v2
+            
+            # Combine primary + secondary stream
+            y_secondary = att2  # shape (B, n_head, T, head_dim)
+            y = (y_primary + y_secondary) / 2
+        else:
+            # No x2 => just use primary
+            y = y_primary
+
+        # Reshape
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-
         # Output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
@@ -141,14 +172,27 @@ class Block(nn.Module):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_3 = LayerNorm(config.n_embd, bias=config.bias)
+
         self.attn = CausalSelfAttention(config)
         self.mlp = MLP(config)
     
-    def forward(self, x,rope_freqs):
-        x = x + self.attn(self.ln_1(x),rope_freqs)
+    def forward(self, x, x2, rope_freqs):
+        x = x + self.attn(self.ln_1(x), self.ln_3(x2), rope_freqs)
         x = x + self.mlp(self.ln_2(x))       
         return x
-
+        
+        
+def gumbel_softmax(logits, tau=1.0, hard=False, eps=1e-10):
+        """Simple Gumbel-Softmax implementation."""
+        U = torch.rand_like(logits)
+        g = -torch.log(-torch.log(U + eps) + eps)
+        y = F.softmax((logits + g) / tau, dim=-1)
+        if hard:
+            index = y.argmax(dim=-1, keepdim=True)  # (b,1)
+            y_hard = torch.zeros_like(y).scatter_(1, index, 1.0)
+            y = (y_hard - y).detach() + y
+        return y  # (b, vocab_size)
 @dataclass
 class GPTConfig:
     block_size: int = 1024
@@ -161,6 +205,7 @@ class GPTConfig:
     return_features: bool = False  # New flag to return hidden representations
     use_rope: bool = True
     noise_alpha: float = 0.5
+    use_secondary_embed: bool = True
 
 class GPT(nn.Module):
 
@@ -223,36 +268,221 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, return_features=False):
+
+    def compute_secondary_embedding(self, x, pos):
+        """
+        Example of how you might treat (token + position) as a complex number,
+        apply a second zero-centered RoPE, sum phase shifts, and take magnitude.
+
+        x:  (B, T, n_embd)  <-- token+pos used as real part
+        pos: (T,)           <-- positions from 0..T-1
+
+        returns x2 of shape (B, T, n_embd), to feed into the second set of attention heads.
+        """
+        B, T, C = x.shape
+        device = x.device
+        # We'll treat 'pos_emb' as the imaginary part, so shape (T, C)
+        pos_emb = self.transformer.wpe(pos)  # (T, n_embd)
+        pos_emb = pos_emb.unsqueeze(0).expand(B, -1, -1)  # (B,T,C)
+
+        # For illustration, let:
+        #   real part = x
+        #   imaginary part = pos_emb
+        # Then "z = real + i * imaginary"
+        # We'll do a second rope that is zero-centered on each index i, i.e. depends on (i - j).
+        # In practice, you might do something more elaborate.
+        # We'll do a toy version to produce a magnitude as output.
+
+        # Make a "phase shift" based on the difference in positions
+        # shape => (T, T) so that shift[i,j] depends on i-j
+        # This is a minimal placeholder demonstration
+        idxs = torch.arange(T, device=device).unsqueeze(1)
+        jdxs = torch.arange(T, device=device).unsqueeze(0)
+        # e.g. shift ~ sin( alpha*(i-j) )
+        phase_shift = (idxs - jdxs).float()
+        phase_shift = torch.sin(0.01 * phase_shift)  # shape (T,T)
+        
+        # We'll “apply” this shift by summing up the imaginary part from all tokens j for each i
+        # and then add it to x.
+        # This is purely conceptual. Replace with your real math as needed.
+        # We'll reduce dimension T -> 1 so that each i gets a single shift value.
+        shift_vals = phase_shift.sum(dim=1)  # (T,) each i
+        shift_vals = shift_vals.unsqueeze(0).unsqueeze(-1)  # (1, T, 1)
+        # Now let's define real = x, imag = pos_emb * shift_vals
+        real_part = x
+        imag_part = pos_emb * shift_vals  # shape (B,T,C)
+
+        # "Magnitude" sqrt(real^2 + imag^2)
+        magnitude = torch.sqrt(real_part**2 + imag_part**2 + 1e-8)
+        # That magnitude is the secondary embedding x2
+        return magnitude
+
+     def forward(
+        self,
+        idx,
+        targets=None,
+        refinement_steps=0,
+        gumbel_tau=1.0,
+        hard_st=True,
+        return_features=None
+    ):
+        """
+        A single forward method that:
+          - If refinement_steps=0, just does a normal forward pass => last-position logits
+          - If refinement_steps>0, does multiple passes:
+              (a) get full-sequence logits,
+              (b) apply Gumbel-Softmax on last token => "virtual token",
+              (c) append it,
+              (d) re-run attention,
+              repeated 'refinement_steps' times,
+              then slice the final output back to the original length,
+              and optionally compute CE loss.
+          - If return_features=True, we return hidden states instead of logits.
+
+        Param:
+          idx: (b, t) integer token IDs
+          targets: (b, t) or None
+          refinement_steps: how many "dance" passes to do
+          gumbel_tau: gumbel temperature
+          hard_st: if True, use straight-through gumbel
+          return_features: override config.return_features if set
+        """
+        if return_features is None:
+            return_features = self.config.return_features
+
         device = idx.device
-        b, t = idx.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
+        b, original_t = idx.shape
 
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos)    # position embeddings of shape (t, n_embd)
-        x = tok_emb + pos_emb
-                    
-        x = self.transformer.drop(x)
-        for block in self.transformer.h:
-            x = block(x, rope_freqs= self.rope_freqs)
-        x = self.transformer.ln_f(x)
-        if return_features or self.config.return_features:
-            return x  # Returning the extracted feature embeddings
+        # If no refinement, just do the usual "one pass" forward that 
+        # returns last-position logits (or full-sequence if you prefer).
+        if refinement_steps == 0:
+            # ---- Normal single forward pass for the given sequence ----
+            x = self._run_transformer(idx)  # shape (b, t, n_embd)
+            
+            if return_features:
+                # If we want the final hidden states:
+                return x  # shape (b, t, n_embd)
+            else:
+                # otherwise, return last-position logits by default:
+                logits = self.lm_head(x[:, -1:, :])  # (b, 1, vocab_size)
+                loss = None
+                if targets is not None:
+                    # compute CE across entire seq
+                    full_logits = self.lm_head(x)      # (b, t, vocab_size)
+                    loss = F.cross_entropy(
+                        full_logits.view(-1, full_logits.size(-1)),
+                        targets.view(-1),
+                        ignore_index=-1
+                    )
+                return logits, loss
 
-        if targets is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        # ------------------------------------------------------------------
+        # If we do have refinement_steps>0, we expand the sequence 
+        # each time we append a "virtual token" (soft or straight-through).
+        # We'll always produce final shape (b, original_t, vocab_size)
+        # if not return_features, so it lines up with the original length.
+        # ------------------------------------------------------------------
+        working_idx = idx  # we'll keep extending this
+
+        for step in range(refinement_steps):
+            # 1) run full-sequence forward => (b, t_current, n_embd)
+            x = self._run_transformer(working_idx)
+
+            # 2) get logits => (b, t_current, vocab_size)
+            logits_full = self.lm_head(x)
+            t_current = working_idx.shape[1]
+
+            # pick last token's distribution => shape (b, vocab_size)
+            last_logits = logits_full[:, t_current-1, :]
+
+            # Gumbel-Softmax => one-hot (soft or ST):
+            soft_dist = gumbel_softmax(last_logits, tau=gumbel_tau, hard=hard_st)
+            # => (b, vocab_size)
+
+            # Weighted sum of embeddings => "virtual token" embedding
+            appended_embed = soft_dist @ self.transformer.wte.weight  # (b, n_embd)
+            appended_embed = appended_embed.unsqueeze(1)              # (b,1,n_embd)
+
+            # Now we physically append a dummy token ID to 'working_idx'.
+            # We'll override its embedding in the next pass.
+            dummy_id = torch.zeros((b,1), device=device, dtype=torch.long)
+            working_idx = torch.cat([working_idx, dummy_id], dim=1)   # (b, t_current+1)
+
+            # 3) re-run a pass that overwrites the last token embedding with appended_embed
+            #    We'll do that by manually building the new hidden states again.
+            x = self._run_transformer(working_idx, override_last_embed=appended_embed)
+
+        # After the final refinement step, 'x' shape => (b, final_t, n_embd),
+        # final_t = original_t + refinement_steps
+        # The final logits => (b, final_t, vocab_size)
+        final_logits = self.lm_head(x)
+
+        # For training alignment, we typically slice back to the original T tokens 
+        # if you want (b, original_t, vocab_size):
+        final_logits_sliced = final_logits[:, :original_t, :]
+
+        if return_features:
+            # Then we return the hidden states up to the original length
+            return x[:, :original_t, :]  # (b, original_t, n_embd)
         else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :])  # note: using list [-1] to preserve the time dim
+            # return (b, original_t, vocab_size)
             loss = None
+            if targets is not None:
+                loss = F.cross_entropy(
+                    final_logits_sliced.view(-1, final_logits_sliced.size(-1)),
+                    targets.view(-1),
+                    ignore_index=-1
+                )
+            return final_logits_sliced, loss
 
-        return logits, loss
+    # ------------------------------------------------------------------
+    # Internal helper that runs the transformer stacks on a given 
+    # index sequence. Optionally override the last token's embedding.
+    # Also includes "secondary embeddings" if config.use_secondary_embed.
+    # ------------------------------------------------------------------
+    def _run_transformer(self, idx, override_last_embed=None):
+        """
+        1) Convert idx -> embeddings
+        2) If override_last_embed is not None, replace the last token's embedding
+        3) (Optional) build secondary embeddings
+        4) Pass through blocks, return final hidden states (b, t, n_embd)
+        """
+        b, t = idx.shape
+        device = idx.device
 
-    def crop_block_size(self, block_size):
+        # Standard token + position embeddings
+        tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
+        pos = torch.arange(t, dtype=torch.long, device=device)
+        pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
+
+        # If we have an override for the last token's embedding
+        if override_last_embed is not None:
+            # override the final token's embedding 
+            tok_emb[:, -1, :] = override_last_embed.squeeze(1)
+
+        x = tok_emb + pos_emb.unsqueeze(0)
+        x = self.transformer.drop(x)
+
+        # If we want secondary embeddings (complex approach), 
+        # we generate x2 each time because the sequence might be extended.
+        x2 = None
+        if self.config.use_secondary_embed:
+            x2 = self.compute_secondary_embedding(x, pos)  
+            # For simplicity, in your code you might pass x2 into the blocks, 
+            # but here we have not extended CausalSelfAttention to handle x2. 
+            # If you have that code, you'd route x2 into it. 
+            # This example is just keeping the method around, 
+            # but not hooking x2 into the attention (unless you extend the attn code).
+
+        # Pass through each block
+        for block in self.transformer.h:
+            x = block(x, ,x2, rope_freqs=self.rope_freqs)
+        # Final layernorm
+        x = self.transformer.ln_f(x)
+        return x
+    
+        
+        def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
         # e.g. we may load the GPT2 pretrained model checkpoint (block size 1024)
         # but want to use a smaller block size for some smaller, simpler model
