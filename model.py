@@ -33,9 +33,7 @@ class CausalSelfAttention(nn.Module):
         # ---- Primary Q,K,V ----
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # ---- Secondary Q,K,V if use_secondary_embed is enabled ----
-        if config.use_secondary_embed:
-            self.c_attn_2 = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        
+
         # Output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         
@@ -65,7 +63,7 @@ class CausalSelfAttention(nn.Module):
         k = torch.cat([k1*cos_theta - k2*sin_theta, k1*sin_theta + k2*cos_theta], dim=-1)
         return q, k
 
-    def forward(self, x, x2=None, rope_freqs=None):
+    def forward(self, x, rope_freqs=None):
         """
         x:  (B, T, C) primary embeddings
         x2: (B, T, C) secondary embeddings (if any)
@@ -103,31 +101,7 @@ class CausalSelfAttention(nn.Module):
         
         y_primary = (att_pos + att_neg) / 2  # (B, n_head, T, head_dim)
 
-        # ---- Secondary pass if x2 is given ----
-        if (x2 is not None):
-            # c_attn_2 -> Q2,K2,V2
-            q2, k2, v2 = self.c_attn_2(x2).split(self.n_embd, dim=2)
-            q2 = q2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-            k2 = k2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-            v2 = v2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
- 
-
-            if self.flash:
-                att2 = F.scaled_dot_product_attention(q2, k2, v2, attn_mask=None,
-                           dropout_p=self.dropout if self.training else 0, is_causal=True)
-            else:
-                att_scores2 = (q2 @ k2.transpose(-2, -1)) * (1.0 / math.sqrt(k2.size(-1)))
-                att_scores2 = att_scores2.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-                att_probs2 = F.softmax(att_scores2, dim=-1)
-                att_probs2 = self.attn_dropout(att_probs2)
-                att2 = att_probs2 @ v2
-            
-            # Combine primary + secondary stream
-            y_secondary = att2  # shape (B, n_head, T, head_dim)
-            y = (y_primary + y_secondary) / 2
-        else:
-            # No x2 => just use primary
-            y = y_primary
+        y = y_primary
 
         # Reshape
         y = y.transpose(1, 2).contiguous().view(B, T, C)
@@ -171,22 +145,12 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.mlp = MLP(config)
     
-    def forward(self, x, x2, rope_freqs):
-        x = x + self.attn(self.ln_1(x), x2, rope_freqs)
+    def forward(self, x, rope_freqs):
+        x = x + self.attn(self.ln_1(x), rope_freqs)
         x = x + self.mlp(self.ln_2(x))       
         return x
         
-        
-def gumbel_softmax(logits, tau=1.0, hard=False, eps=1e-10):
-        """Simple Gumbel-Softmax implementation."""
-        U = torch.rand_like(logits)
-        g = -torch.log(-torch.log(U + eps) + eps)
-        y = F.softmax((logits + g) / tau, dim=-1)
-        if hard:
-            index = y.argmax(dim=-1, keepdim=True)  # (b,1)
-            y_hard = torch.zeros_like(y).scatter_(1, index, 1.0)
-            y = (y_hard - y).detach() + y
-        return y  # (b, vocab_size)
+    
 @dataclass
 class GPTConfig:
     block_size: int = 1024
@@ -199,7 +163,6 @@ class GPTConfig:
     return_features: bool = False  # New flag to return hidden representations
     use_rope: bool = True
     noise_alpha: float = 0.5
-    use_secondary_embed: bool = True
 
 class GPT(nn.Module):
 
@@ -263,7 +226,7 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
 
-    def compute_secondary_embedding(self, tok_emb, pos_emb):
+    def compute_phase_embedding(self, tok_emb, pos_emb):
             """
             Computes a secondary embedding for each token by accumulating phase shifts.
             
@@ -324,8 +287,7 @@ class GPT(nn.Module):
             # Using einsum: treat phase_emb as (T, T, C) and x as (B, T, C) so that we sum over j.
             phi = torch.einsum('ijc,bjc->bic', phase_emb, tok_emb)
             phi = phi / (T ** 0.5)
-            x2 = phi + tok_emb
-            return x2
+            return phi
 
 
 
@@ -402,24 +364,14 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
         pos = torch.arange(t, dtype=torch.long, device=device)
         pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
+        phase = self.compute_phase_embedding(tok_emb, pos_emb)  
 
-        x = tok_emb + pos_emb.unsqueeze(0)
+        x = tok_emb + pos_emb.unsqueeze(0) + phase
         x = self.transformer.drop(x)
-
-        # If we want secondary embeddings (complex approach), 
-        # we generate x2 each time because the sequence might be extended.
-        x2 = None
-        if self.config.use_secondary_embed:
-            x2 = self.compute_secondary_embedding(tok_emb, pos_emb)  
-            # For simplicity, in your code you might pass x2 into the blocks, 
-            # but here we have not extended CausalSelfAttention to handle x2. 
-            # If you have that code, you'd route x2 into it. 
-            # This example is just keeping the method around, 
-            # but not hooking x2 into the attention (unless you extend the attn code).
 
         # Pass through each block
         for block in self.transformer.h:
-            x = block(x, x2, rope_freqs=self.rope_freqs)
+            x = block(x, rope_freqs=self.rope_freqs)
         # Final layernorm
         x = self.transformer.ln_f(x)
         return x
