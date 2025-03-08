@@ -476,7 +476,7 @@ class GPT(nn.Module):
 
         # Pass through each block
         for block in self.transformer.h:
-            x = block(x, ,x2, rope_freqs=self.rope_freqs)
+            x = block(x, x2, rope_freqs=self.rope_freqs)
         # Final layernorm
         x = self.transformer.ln_f(x)
         return x
