@@ -201,7 +201,7 @@ class GPTConfig:
     return_features: bool = False  # New flag to return hidden representations
     use_rope: bool = True
     noise_alpha: float = 0.5
-    use_secondary_embed: bool = True
+    use_secondary_embed: bool = False
 
 class GPT(nn.Module):
 
