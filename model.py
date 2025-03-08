@@ -339,7 +339,7 @@ class GPT(nn.Module):
         self,
         idx,
         targets=None,
-        refinement_steps=1,
+        refinement_steps=0,
         gumbel_tau=1.0,
         hard_st=True,
         return_features=None
