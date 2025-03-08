@@ -177,6 +177,10 @@ class GPT(nn.Module):
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            xh = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            yh = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            zh = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -364,20 +368,31 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
         pos = torch.arange(t, dtype=torch.long, device=device)
         pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
-        phase = self.compute_phase_embedding(tok_emb, pos_emb)  
+        phase = self.compute_phase_embedding(tok_emb, pos_emb) _ 
 
         x = tok_emb + pos_emb.unsqueeze(0) 
-
+        y = phase +  pos_emb.unsqueeze(0)   
+        z = tok_emb + phase
+        #Why-What, What-When, When-Why
+        #why each thing happens in space, why each thing is connected to other things,
+        #when each thing happens.
+        
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
         
         # Step 2: Apply dropout mask to token embeddings (x) and later to phase embeddings
         x = x * dropout_mask  
-        phase = phase * dropout_mask              
+        y = y * dropout_mask              
+        z = z * dropout_mask
         
         # Pass through each block
+        for i, (xblock, yblock, zblock) in enumerate(zip(self.transformer.xh, self.transformer.yh, self.transformer.zh)):
+            x = xblock(x, rope_freqs=self.rope_freqs)
+            y = yblock(y, rope_freqs=self.rope_freqs)
+            z = zblock(z, rope_freqs=self.rope_freqs)
+
+        x = (x + y + z)/3
         for i, block in enumerate(self.transformer.h):
-            phi_weight = (i + 1) / len(self.transformer.h)  # Scale from 0% to 100%
-            x = block(x + phase * phi_weight, rope_freqs=self.rope_freqs)
+            x = block(x, rope_freqs=self.rope_freqs)       
 
         # Final layernorm
         x = self.transformer.ln_f(x)
