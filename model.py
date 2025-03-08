@@ -392,7 +392,8 @@ class GPT(nn.Module):
             x = xblock(x, rope_freqs=self.rope_freqs)
             y = yblock(y, rope_freqs=self.rope_freqs)
             z = zblock(z, rope_freqs=self.rope_freqs)
-
+        print(f"x type: {type(x)}")  
+        print(f"ln_x type: {type(self.ln_x)}")  
         x = self.ln_x(x)
         y = self.ln_y(y)
         z = self.ln_z(z)
