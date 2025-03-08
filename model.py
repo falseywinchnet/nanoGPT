@@ -368,7 +368,7 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
         pos = torch.arange(t, dtype=torch.long, device=device)
         pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
-        phase = self.compute_phase_embedding(tok_emb, pos_emb) _ 
+        phase = self.compute_phase_embedding(tok_emb, pos_emb) 
 
         x = tok_emb + pos_emb.unsqueeze(0) 
         y = phase +  pos_emb.unsqueeze(0)   
