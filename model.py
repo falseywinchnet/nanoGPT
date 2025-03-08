@@ -325,7 +325,7 @@ class GPT(nn.Module):
             # Using einsum: treat pos_emb as (T, T, C) and x as (B, T, C) so that we sum over j.
             phi = torch.einsum('ijc,bjc->bic', x, pos_emb)  # (B, T, C)
             phi = phi / (T ** 0.5)
-            phi = phi + pos
+            phi = phi + pos.unsqueeze(0)
             x2 = x + phi
             return x2
 
