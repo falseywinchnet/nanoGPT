@@ -180,10 +180,8 @@ class GPT(nn.Module):
             drop = nn.Dropout(config.dropout),
             prelude = nn.ModuleList([Block(config) for _ in range(1)]),
             preludey = nn.ModuleList([Block(config) for _ in range(1)]),
-
             coda = nn.ModuleList([Block(config) for _ in range(1)]),
-            xh = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            yh = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -390,10 +388,8 @@ class GPT(nn.Module):
             residualy = block(y, rope_freqs=self.rope_freqs)  
                  
         # Pass through each block
-        for i, (xblock, yblock) in enumerate(zip(self.transformer.xh, self.transformer.yh)):
-            x = xblock(x+residual, rope_freqs=self.rope_freqs)
-            y = yblock(y+residualy, rope_freqs=self.rope_freqs)
-            x = x + self.ln_y(y) #integrate to each stage
+        for i, block in enumerate(self.transformer.residual):
+            x = block(x+residual+residualy, rope_freqs=self.rope_freqs)
 
                     
         for i, block in enumerate(self.transformer.coda):
