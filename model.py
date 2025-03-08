@@ -71,8 +71,7 @@ class CausalSelfAttention(nn.Module):
         x2: (B, T, C) secondary embeddings (if any)
         """
         B, T, C = x.size()
-        if rope_freqs is None:
-            rope_freqs = self.rope_freqs  # the real buffer
+
 
         # ---- Primary pass Q,K,V ----
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
@@ -85,6 +84,7 @@ class CausalSelfAttention(nn.Module):
         v_neg = v - noise
 
         if self.use_rope and rope_freqs is not None:
+            self.rope_freqs = rope_freqs
             q, k = self.apply_rope(q, k)
 
         # Compute attention for the primary embedding
@@ -111,8 +111,6 @@ class CausalSelfAttention(nn.Module):
             k2 = k2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
             v2 = v2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-            if self.use_rope and rope_freqs is not None:
-                q2, k2 = self.apply_rope(q2, k2)
 
             if self.flash:
                 att2 = F.scaled_dot_product_attention(q2, k2, v2, attn_mask=None,
