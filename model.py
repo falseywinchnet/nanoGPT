@@ -267,46 +267,48 @@ class GPT(nn.Module):
 
     def compute_secondary_embedding(self, x, pos):
         """
-        Computes a secondary embedding by applying a unique RoPE frequency matrix 
-        centered on each index, multiplying it by the embeddings of all other tokens, 
-        aggregating phase shifts, and finally returning the magnitude after a complex shift.
-        
-        x:  (B, T, n_embd)  <-- token+pos used as real part
-        pos: (T,)           <-- positions from 0..T-1
+        Computes a secondary embedding using a cumulative phase shift derived from relative offsets.
+    
+        x:  (B, T, C)  <-- token+pos embeddings (real part)
+        pos: (T,)      <-- positions 0..T-1
         
         Returns:
-          x2: (B, T, n_embd), representing the transformed magnitude embedding.
+          x2: (B, T, C), the transformed magnitude embedding.
         """
         B, T, C = x.shape
         device = x.device
-        head_dim = C // self.config.n_head  # Assuming head_dim is C divided by the number of heads
+        head_dim = C // self.config.n_head  # Ensure this correctly divides
     
-        # Generate unique RoPE frequency matrix for each index
-        rope_freqs = torch.zeros((T, head_dim), device=device)
-        for i in range(T):
-            # Generate a RoPE frequency spectrum centered on i
-            rope_freqs[i] = 1.0 / (10000 ** ((torch.arange(head_dim, device=device).float() / head_dim) + i / T))
+        # Generate unique RoPE frequency matrix for each index, centered at itself
+        rope_freqs = 1.0 / (10000 ** (torch.arange(head_dim, device=device).float() / head_dim))
+        
+        # Compute relative positional offsets for all pairs (T, T)
+        idxs = torch.arange(T, device=device).unsqueeze(1)
+        jdxs = torch.arange(T, device=device).unsqueeze(0)
+        relative_offsets = (idxs - jdxs).float()  # (T, T)
+        
+        # Convert offsets into phase shifts
+        phase_shifts = torch.sin(relative_offsets.unsqueeze(-1) * rope_freqs)  # (T, T, head_dim)
     
-        # Expand the RoPE matrix so it can be applied across batches and heads
-        rope_freqs = rope_freqs.unsqueeze(0).expand(B, -1, -1)  # (B, T, head_dim)
+        # Expand for batch processing
+        phase_shifts = phase_shifts.unsqueeze(0).expand(B, -1, -1, -1)  # (B, T, T, head_dim)
     
-        # Extract real and imaginary parts (treat x as real, apply RoPE to get imaginary)
-        real_part = x  # Real component
-        imag_part = torch.sin(pos.float().unsqueeze(0).unsqueeze(-1) * rope_freqs)  # (B, T, C)
+        # Apply cumulative phase shift from all other indexes
+        real_part = x.view(B, T, self.config.n_head, head_dim)  # (B, T, n_head, head_dim)
+        cumulative_shift = torch.einsum('bthd,bshd->bthd', real_part, phase_shifts.sum(dim=2))  # (B, T, n_head, head_dim)
     
-        # Phase shift computation
-        # Multiply embeddings by RoPE-transformed values of all other tokens
-        shift_matrix = torch.einsum('btc,bsc->btsc', real_part, imag_part)  # (B, T, S, C)
-        phase_shifts = shift_matrix.sum(dim=2)  # Sum over sequence positions (B, T, C)
+        # Apply complex phase transformation
+        shifted_real = real_part * cumulative_shift.cos() - cumulative_shift.sin()
+        shifted_imag = real_part * cumulative_shift.sin() + cumulative_shift.cos()
     
-        # Apply the complex transformation
-        shifted_real = real_part * phase_shifts.cos() - imag_part * phase_shifts.sin()
-        shifted_imag = real_part * phase_shifts.sin() + imag_part * phase_shifts.cos()
+        # Compute magnitude of the transformed embedding
+        x2 = torch.sqrt(shifted_real**2 + shifted_imag**2 + 1e-8)  # (B, T, n_head, head_dim)
     
-        # Compute the magnitude as the final x2 embedding
-        x2 = torch.sqrt(shifted_real**2 + shifted_imag**2 + 1e-8)  # Avoid division by zero
+        # Reshape back to original shape
+        x2 = x2.reshape(B, T, C)
     
-        return x2  # Shape (B, T, n_embd)
+        return x2
+
 
     def forward(
         self,
