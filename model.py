@@ -149,7 +149,35 @@ class Block(nn.Module):
         x = x + self.attn(self.ln_1(x), rope_freqs)
         x = x + self.mlp(self.ln_2(x))       
         return x
-        
+
+
+class ResBlock(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttention(config)
+        self.mlp = MLP(config)
+    
+    def forward(self, x, rope_freqs, num_iterations=3):
+        """
+        Iteratively apply attention and MLP with residuals over multiple steps.
+        """
+        for _ in range(num_iterations):  # Number of recurrence steps
+            residual = x  # Capture the original input as the residual
+
+            # Apply normalization and attention (using the residual)
+            x = self.ln_1(x)
+            x = self.attn(x, rope_freqs)
+
+            # Apply normalization and MLP (using the residual)
+            x = self.ln_2(x)
+            x = self.mlp(x)
+
+            # Add the residual after each iteration to refine the result
+            x = x + residual
+
+        return x
     
 @dataclass
 class GPTConfig:
@@ -181,7 +209,7 @@ class GPT(nn.Module):
             prelude = nn.ModuleList([Block(config) for _ in range(1)]),
             preludey = nn.ModuleList([Block(config) for _ in range(1)]),
             coda = nn.ModuleList([Block(config) for _ in range(1)]),
-            residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            residual = nn.ModuleList([ResBlock(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -386,10 +414,11 @@ class GPT(nn.Module):
        
         for i, block in enumerate(self.transformer.preludey):
             residualy = block(y, rope_freqs=self.rope_freqs)  
-                 
+
+        x = x + self.ln_y(residualy)
         # Pass through each block
         for i, block in enumerate(self.transformer.residual):
-            x = block(x+residual+residualy, rope_freqs=self.rope_freqs)
+            x = block(x+residual, rope_freqs=self.rope_freqs)
 
                     
         for i, block in enumerate(self.transformer.coda):
