@@ -171,9 +171,9 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
-        self.ln_x = LayerNorm(config.n_embd, bias=config.bias),
-        self.ln_y = LayerNorm(config.n_embd, bias=config.bias),
-        self.ln_z = LayerNorm(config.n_embd, bias=config.bias),
+        self.ln_x = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_y = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_z = LayerNorm(config.n_embd, bias=config.bias)
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
