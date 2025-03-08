@@ -124,7 +124,7 @@ class CausalSelfAttention(nn.Module):
             
             # Combine primary + secondary stream
             y_secondary = att2  # shape (B, n_head, T, head_dim)
-            y = (y_primary + y_secondary) / 2
+            y = (y_primary *0.9 + y_secondary*0.1) / 2
         else:
             # No x2 => just use primary
             y = y_primary
@@ -199,7 +199,7 @@ class GPTConfig:
     return_features: bool = False  # New flag to return hidden representations
     use_rope: bool = True
     noise_alpha: float = 0.5
-    use_secondary_embed: bool = False
+    use_secondary_embed: bool = True
 
 class GPT(nn.Module):
 
@@ -323,10 +323,12 @@ class GPT(nn.Module):
             # φ[i, c] = sum_{j != i} [ pos_emb[i,j,c] * x[b,j,c] ]
             # Using einsum: treat pos_emb as (T, T, C) and x as (B, T, C) so that we sum over j.
             phi = torch.einsum('ijc,bjc->bic', pos_emb, x)  # (B, T, C)
+            phi = phi / (T ** 0.5)
+
         
             # Now, apply the phase shift to x[i].
             # Here we treat x as the real part and φ as the imaginary part, and take magnitude.
-            x2 = torch.sqrt(x**2 + phi**2 + 1e-8)  # (B, T, C)
+            x2 = torch.sqrt(x**2 +  phi**2 + 1e-8)  # (B, T, C)
         
             return x2
 
@@ -483,7 +485,7 @@ class GPT(nn.Module):
         # we generate x2 each time because the sequence might be extended.
         x2 = None
         if self.config.use_secondary_embed:
-            x2 = self.compute_secondary_embedding(x, pos)  
+            x2 = self.compute_secondary_embedding(tok_emb, pos)  
             # For simplicity, in your code you might pass x2 into the blocks, 
             # but here we have not extended CausalSelfAttention to handle x2. 
             # If you have that code, you'd route x2 into it. 
