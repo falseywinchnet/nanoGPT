@@ -277,7 +277,8 @@ class GPT(nn.Module):
             """
             B, T, C = x.shape
             device = x.device
-            head_dim = C // self.config.n_head  # Ensure division is valid
+            n_head = self.config.n_head
+            head_dim = C // n_head  # Ensure division is valid
         
             # Generate RoPE frequency spectrum for each index
             rope_freqs = 1.0 / (10000 ** (torch.arange(head_dim, device=device).float() / head_dim))
@@ -291,14 +292,13 @@ class GPT(nn.Module):
             phase_shifts = torch.sin(relative_offsets.unsqueeze(-1) * rope_freqs)  # (T, T, head_dim)
         
             # Expand for batch processing
-            phase_shifts = phase_shifts.unsqueeze(0).expand(B, -1, -1, -1)  # (B, T, T, head_dim)
+            phase_shifts = phase_shifts.unsqueeze(0).unsqueeze(2).expand(B, -1, n_head, -1, -1)  # (B, T, n_head, T, head_dim)
         
             # Reshape token embeddings into attention heads
-            real_part = x.view(B, T, self.config.n_head, head_dim)  # (B, T, n_head, head_dim)
+            real_part = x.view(B, T, n_head, head_dim)  # (B, T, n_head, head_dim)
         
-            # Compute cumulative phase shift using batch matrix multiplication
-            cumulative_shift = torch.matmul(phase_shifts, real_part.transpose(1, 2))  # (B, T, T, n_head, head_dim)
-            cumulative_shift = cumulative_shift.sum(dim=2)  # Sum over all relative contributions (B, T, n_head, head_dim)
+            # Compute cumulative phase shift by applying it across all positions
+            cumulative_shift = torch.einsum('btshd,bthd->bthd', phase_shifts, real_part)  # (B, T, n_head, head_dim)
         
             # Apply complex phase transformation
             shifted_real = real_part * cumulative_shift.cos() - cumulative_shift.sin()
@@ -311,6 +311,7 @@ class GPT(nn.Module):
             x2 = x2.reshape(B, T, C)
         
             return x2
+
 
 
     def forward(
