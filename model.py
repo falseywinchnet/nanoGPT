@@ -267,50 +267,71 @@ class GPT(nn.Module):
 
     def compute_secondary_embedding(self, x, pos):
             """
-            Computes a secondary embedding using a cumulative phase shift derived from relative offsets.
-        
-            x:  (B, T, C)  <-- token+pos embeddings (real part)
-            pos: (T,)      <-- positions 0..T-1
+            Computes a secondary embedding for each token by accumulating phase shifts.
+            
+            For each token position i in x (of shape (B, T, C)):
+              - We have two positional embeddings:
+                   * A forward rope embedding for tokens j > i.
+                   * A backward rope embedding for tokens j < i.
+              - For each token j (j != i), we compute a positional indication:
+                   If j > i: use forward embedding (function of j - i)
+                   If j < i: use backward embedding (function of i - j)
+              - Multiply that positional indication (elementwise) by x[j] to get a phase shift contribution.
+              - Sum over all j to obtain a cumulative phase shift, φ[i].
+              - Form a complex number with:
+                   real part = x[i]
+                   imaginary part = φ[i]
+                and take the magnitude:
+                   x2[i] = sqrt( x[i]^2 + φ[i]^2 )
+            
+            Args:
+                x: Tensor of shape (B, T, C) representing token embeddings.
+                pos: Tensor of shape (T,) with positions (0, 1, ..., T-1).
             
             Returns:
-              x2: (B, T, C), the transformed magnitude embedding.
+                x2: Tensor of shape (B, T, C), the secondary embeddings.
             """
             B, T, C = x.shape
             device = x.device
-            n_head = self.config.n_head
-            head_dim = C // n_head  # Ensure division is valid
         
-            # Generate RoPE frequency spectrum for each index
-            rope_freqs = 1.0 / (10000 ** (torch.arange(head_dim, device=device).float() / head_dim))
+            # Define fixed frequencies per dimension (like standard RoPE frequencies).
+            dims = torch.arange(C, device=device, dtype=torch.float32)  # (C,)
+            freqs = 1.0 / (10000 ** (dims / C))  # (C,)
         
-            # Compute relative positional offsets for all pairs (T, T)
-            idxs = torch.arange(T, device=device).unsqueeze(1)
-            jdxs = torch.arange(T, device=device).unsqueeze(0)
-            relative_offsets = (idxs - jdxs).float()  # Shape: (T, T)
+            # Compute a matrix of relative offsets: offset[i, j] = j - i.
+            indices = torch.arange(T, device=device)
+            offset_matrix = indices.unsqueeze(0) - indices.unsqueeze(1)  # shape (T, T)
         
-            # Convert offsets into phase shifts
-            phase_shifts = torch.sin(relative_offsets.unsqueeze(-1) * rope_freqs)  # (T, T, head_dim)
+            # Create masks for forward and backward directions.
+            forward_mask = (offset_matrix > 0).float()  # (T, T)
+            backward_mask = (offset_matrix < 0).float()  # (T, T)
         
-            # Expand for batch processing
-            phase_shifts = phase_shifts.unsqueeze(0).unsqueeze(2).expand(B, -1, n_head, -1, -1)  # (B, T, n_head, T, head_dim)
+            # For each pair (i, j) compute the absolute offset:
+            # For forward, we care about (j - i) and for backward, (i - j).
+            forward_offsets = torch.clamp(offset_matrix, min=0)  # (T, T): zeros for j <= i.
+            backward_offsets = torch.clamp(-offset_matrix, min=0)  # (T, T): zeros for j >= i.
         
-            # Reshape token embeddings into attention heads
-            real_part = x.view(B, T, n_head, head_dim)  # (B, T, n_head, head_dim)
+            # Compute forward and backward positional rope embeddings.
+            # Here we use a simple sinusoidal function.
+            # Each will have shape (T, T, C): for each i and j, a vector of length C.
+            forward_pos_emb = torch.sin(forward_offsets.unsqueeze(-1) * freqs.view(1, 1, C))
+            backward_pos_emb = torch.sin(backward_offsets.unsqueeze(-1) * freqs.view(1, 1, C))
+            
+            # Combine them: for each pair (i,j), use the forward embedding if j>i, backward if j<i.
+            pos_emb = forward_mask.unsqueeze(-1) * forward_pos_emb + backward_mask.unsqueeze(-1) * backward_pos_emb
+            # For j == i, offset is 0 so sin(0)=0; effectively these contribute nothing.
         
-            # Compute cumulative phase shift by applying it across all positions
-            cumulative_shift = torch.einsum('btshd,bthd->bthd', phase_shifts, real_part)  # (B, T, n_head, head_dim)
+            # Now, for each token position i (for each batch element), accumulate contributions from all j:
+            # φ[i, c] = sum_{j != i} [ pos_emb[i,j,c] * x[b,j,c] ]
+            # Using einsum: treat pos_emb as (T, T, C) and x as (B, T, C) so that we sum over j.
+            phi = torch.einsum('ijc,bjc->bic', pos_emb, x)  # (B, T, C)
         
-            # Apply complex phase transformation
-            shifted_real = real_part * cumulative_shift.cos() - cumulative_shift.sin()
-            shifted_imag = real_part * cumulative_shift.sin() + cumulative_shift.cos()
-        
-            # Compute magnitude of the transformed embedding
-            x2 = torch.sqrt(shifted_real**2 + shifted_imag**2 + 1e-8)  # (B, T, n_head, head_dim)
-        
-            # Reshape back to original shape
-            x2 = x2.reshape(B, T, C)
+            # Now, apply the phase shift to x[i].
+            # Here we treat x as the real part and φ as the imaginary part, and take magnitude.
+            x2 = torch.sqrt(x**2 + phi**2 + 1e-8)  # (B, T, C)
         
             return x2
+
 
 
 
