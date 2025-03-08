@@ -266,48 +266,51 @@ class GPT(nn.Module):
 
 
     def compute_secondary_embedding(self, x, pos):
-        """
-        Computes a secondary embedding using a cumulative phase shift derived from relative offsets.
-    
-        x:  (B, T, C)  <-- token+pos embeddings (real part)
-        pos: (T,)      <-- positions 0..T-1
+            """
+            Computes a secondary embedding using a cumulative phase shift derived from relative offsets.
         
-        Returns:
-          x2: (B, T, C), the transformed magnitude embedding.
-        """
-        B, T, C = x.shape
-        device = x.device
-        head_dim = C // self.config.n_head  # Ensure this correctly divides
-    
-        # Generate unique RoPE frequency matrix for each index, centered at itself
-        rope_freqs = 1.0 / (10000 ** (torch.arange(head_dim, device=device).float() / head_dim))
+            x:  (B, T, C)  <-- token+pos embeddings (real part)
+            pos: (T,)      <-- positions 0..T-1
+            
+            Returns:
+              x2: (B, T, C), the transformed magnitude embedding.
+            """
+            B, T, C = x.shape
+            device = x.device
+            head_dim = C // self.config.n_head  # Ensure division is valid
         
-        # Compute relative positional offsets for all pairs (T, T)
-        idxs = torch.arange(T, device=device).unsqueeze(1)
-        jdxs = torch.arange(T, device=device).unsqueeze(0)
-        relative_offsets = (idxs - jdxs).float()  # (T, T)
+            # Generate RoPE frequency spectrum for each index
+            rope_freqs = 1.0 / (10000 ** (torch.arange(head_dim, device=device).float() / head_dim))
         
-        # Convert offsets into phase shifts
-        phase_shifts = torch.sin(relative_offsets.unsqueeze(-1) * rope_freqs)  # (T, T, head_dim)
-    
-        # Expand for batch processing
-        phase_shifts = phase_shifts.unsqueeze(0).expand(B, -1, -1, -1)  # (B, T, T, head_dim)
-    
-        # Apply cumulative phase shift from all other indexes
-        real_part = x.view(B, T, self.config.n_head, head_dim)  # (B, T, n_head, head_dim)
-        cumulative_shift = torch.einsum('bthd,bshd->bthd', real_part, phase_shifts.sum(dim=2))  # (B, T, n_head, head_dim)
-    
-        # Apply complex phase transformation
-        shifted_real = real_part * cumulative_shift.cos() - cumulative_shift.sin()
-        shifted_imag = real_part * cumulative_shift.sin() + cumulative_shift.cos()
-    
-        # Compute magnitude of the transformed embedding
-        x2 = torch.sqrt(shifted_real**2 + shifted_imag**2 + 1e-8)  # (B, T, n_head, head_dim)
-    
-        # Reshape back to original shape
-        x2 = x2.reshape(B, T, C)
-    
-        return x2
+            # Compute relative positional offsets for all pairs (T, T)
+            idxs = torch.arange(T, device=device).unsqueeze(1)
+            jdxs = torch.arange(T, device=device).unsqueeze(0)
+            relative_offsets = (idxs - jdxs).float()  # Shape: (T, T)
+        
+            # Convert offsets into phase shifts
+            phase_shifts = torch.sin(relative_offsets.unsqueeze(-1) * rope_freqs)  # (T, T, head_dim)
+        
+            # Expand for batch processing
+            phase_shifts = phase_shifts.unsqueeze(0).expand(B, -1, -1, -1)  # (B, T, T, head_dim)
+        
+            # Reshape token embeddings into attention heads
+            real_part = x.view(B, T, self.config.n_head, head_dim)  # (B, T, n_head, head_dim)
+        
+            # Compute cumulative phase shift using batch matrix multiplication
+            cumulative_shift = torch.matmul(phase_shifts, real_part.transpose(1, 2))  # (B, T, T, n_head, head_dim)
+            cumulative_shift = cumulative_shift.sum(dim=2)  # Sum over all relative contributions (B, T, n_head, head_dim)
+        
+            # Apply complex phase transformation
+            shifted_real = real_part * cumulative_shift.cos() - cumulative_shift.sin()
+            shifted_imag = real_part * cumulative_shift.sin() + cumulative_shift.cos()
+        
+            # Compute magnitude of the transformed embedding
+            x2 = torch.sqrt(shifted_real**2 + shifted_imag**2 + 1e-8)  # (B, T, n_head, head_dim)
+        
+            # Reshape back to original shape
+            x2 = x2.reshape(B, T, C)
+        
+            return x2
 
 
     def forward(
