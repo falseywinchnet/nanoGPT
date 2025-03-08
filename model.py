@@ -65,16 +65,14 @@ class CausalSelfAttention(nn.Module):
         k = torch.cat([k1*cos_theta - k2*sin_theta, k1*sin_theta + k2*cos_theta], dim=-1)
         return q, k
 
-    def forward(self, x, rope_freqs=None, x2=None):
+    def forward(self, x, x2=None, rope_freqs=None):
         """
         x:  (B, T, C) primary embeddings
         x2: (B, T, C) secondary embeddings (if any)
         """
         B, T, C = x.size()
-        
-        # Store rope freqs if provided
-        if rope_freqs is not None:
-            self.rope_freqs = rope_freqs
+        if rope_freqs is None:
+            rope_freqs = self.rope_freqs  # the real buffer
 
         # ---- Primary pass Q,K,V ----
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
