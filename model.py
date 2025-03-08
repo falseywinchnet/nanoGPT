@@ -145,7 +145,7 @@ class Block(nn.Module):
         self.mlp = MLP(config)
     
     def forward(self, x,rope_freqs):
-        x = x + self.attn(self.ln_1(x),rope_freqs))
+        x = x + self.attn(self.ln_1(x),rope_freqs)
         x = x + self.mlp(self.ln_2(x))       
         return x
 
