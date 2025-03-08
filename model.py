@@ -324,12 +324,8 @@ class GPT(nn.Module):
             # Using einsum: treat pos_emb as (T, T, C) and x as (B, T, C) so that we sum over j.
             phi = torch.einsum('ijc,bjc->bic', pos_emb, x)  # (B, T, C)
             phi = phi / (T ** 0.5)
-
-        
-            # Now, apply the phase shift to x[i].
-            # Here we treat x as the real part and φ as the imaginary part, and take magnitude.
-            x2 = torch.sqrt(x**2 +  phi**2 + 1e-8)  # (B, T, C)
-        
+            phi = phi + pos_emb
+            x2 = x + phi
             return x2
 
 
@@ -339,9 +335,6 @@ class GPT(nn.Module):
         self,
         idx,
         targets=None,
-        refinement_steps=0,
-        gumbel_tau=1.0,
-        hard_st=True,
         return_features=None
     ):
         """
@@ -373,26 +366,25 @@ class GPT(nn.Module):
 
         # If no refinement, just do the usual "one pass" forward that 
         # returns last-position logits (or full-sequence if you prefer).
-        if refinement_steps == 0:
             # ---- Normal single forward pass for the given sequence ----
-            x = self._run_transformer(idx)  # shape (b, t, n_embd)
-            
-            if return_features:
-                # If we want the final hidden states:
-                return x  # shape (b, t, n_embd)
-            else:
-                # otherwise, return last-position logits by default:
-                logits = self.lm_head(x[:, -1:, :])  # (b, 1, vocab_size)
-                loss = None
-                if targets is not None:
-                    # compute CE across entire seq
-                    full_logits = self.lm_head(x)      # (b, t, vocab_size)
-                    loss = F.cross_entropy(
-                        full_logits.view(-1, full_logits.size(-1)),
-                        targets.view(-1),
-                        ignore_index=-1
-                    )
-                return logits, loss
+        x = self._run_transformer(idx)  # shape (b, t, n_embd)
+        
+        if return_features:
+            # If we want the final hidden states:
+            return x  # shape (b, t, n_embd)
+        else:
+            # otherwise, return last-position logits by default:
+            logits = self.lm_head(x[:, -1:, :])  # (b, 1, vocab_size)
+            loss = None
+            if targets is not None:
+                # compute CE across entire seq
+                full_logits = self.lm_head(x)      # (b, t, vocab_size)
+                loss = F.cross_entropy(
+                    full_logits.view(-1, full_logits.size(-1)),
+                    targets.view(-1),
+                    ignore_index=-1
+                )
+            return logits, loss
 
         # ------------------------------------------------------------------
         # If we do have refinement_steps>0, we expand the sequence 
@@ -400,58 +392,7 @@ class GPT(nn.Module):
         # We'll always produce final shape (b, original_t, vocab_size)
         # if not return_features, so it lines up with the original length.
         # ------------------------------------------------------------------
-        working_idx = idx  # we'll keep extending this
-
-        for step in range(refinement_steps):
-            # 1) run full-sequence forward => (b, t_current, n_embd)
-            x = self._run_transformer(working_idx)
-
-            # 2) get logits => (b, t_current, vocab_size)
-            logits_full = self.lm_head(x)
-            t_current = working_idx.shape[1]
-
-            # pick last token's distribution => shape (b, vocab_size)
-            last_logits = logits_full[:, t_current-1, :]
-
-            # Gumbel-Softmax => one-hot (soft or ST):
-            soft_dist = gumbel_softmax(last_logits, tau=gumbel_tau, hard=hard_st)
-            # => (b, vocab_size)
-
-            # Weighted sum of embeddings => "virtual token" embedding
-            appended_embed = soft_dist @ self.transformer.wte.weight  # (b, n_embd)
-            appended_embed = appended_embed.unsqueeze(1)              # (b,1,n_embd)
-
-            # Now we physically append a dummy token ID to 'working_idx'.
-            # We'll override its embedding in the next pass.
-            dummy_id = torch.zeros((b,1), device=device, dtype=torch.long)
-            working_idx = torch.cat([working_idx, dummy_id], dim=1)   # (b, t_current+1)
-
-            # 3) re-run a pass that overwrites the last token embedding with appended_embed
-            #    We'll do that by manually building the new hidden states again.
-            x = self._run_transformer(working_idx, override_last_embed=appended_embed)
-
-        # After the final refinement step, 'x' shape => (b, final_t, n_embd),
-        # final_t = original_t + refinement_steps
-        # The final logits => (b, final_t, vocab_size)
-        final_logits = self.lm_head(x)
-
-        # For training alignment, we typically slice back to the original T tokens 
-        # if you want (b, original_t, vocab_size):
-        final_logits_sliced = final_logits[:, :original_t, :]
-
-        if return_features:
-            # Then we return the hidden states up to the original length
-            return x[:, :original_t, :]  # (b, original_t, n_embd)
-        else:
-            # return (b, original_t, vocab_size)
-            loss = None
-            if targets is not None:
-                loss = F.cross_entropy(
-                    final_logits_sliced.contiguous().view(-1, final_logits_sliced.size(-1)),
-                    targets.view(-1),
-                    ignore_index=-1
-                )
-            return final_logits_sliced, loss
+        
 
     # ------------------------------------------------------------------
     # Internal helper that runs the transformer stacks on a given 
