@@ -182,8 +182,6 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             xh = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             yh = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            zh = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -374,30 +372,22 @@ class GPT(nn.Module):
         phase = self.compute_phase_embedding(tok_emb, pos_emb) 
 
         x = tok_emb + pos_emb.unsqueeze(0) 
-        y = phase +  pos_emb.unsqueeze(0)   
-        z = tok_emb + phase
-        #Why-What, What-When, When-Why
-        #why each thing happens in space, why each thing is connected to other things,
-        #when each thing happens.
+        y = tok_emb + phase
+
         
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
         
         # Step 2: Apply dropout mask to token embeddings (x) and later to phase embeddings
         x = x * dropout_mask  
         y = y * dropout_mask              
-        z = z * dropout_mask
         
         # Pass through each block
-        for i, (xblock, yblock, zblock) in enumerate(zip(self.transformer.xh, self.transformer.yh, self.transformer.zh)):
+        for i, (xblock, yblock) in enumerate(zip(self.transformer.xh, self.transformer.yh)):
             x = xblock(x, rope_freqs=self.rope_freqs)
             y = yblock(y, rope_freqs=self.rope_freqs)
-            z = zblock(z, rope_freqs=self.rope_freqs)
-        print(f"x type: {type(x)}")  
-        print(f"ln_x type: {type(self.ln_x)}")  
         x = self.ln_x(x)
         y = self.ln_y(y)
-        z = self.ln_z(z)
-        x = (x + y + z) / 3
+        x = (x + y ) / 2
 
         for i, block in enumerate(self.transformer.h):
             x = block(x, rope_freqs=self.rope_freqs)       
