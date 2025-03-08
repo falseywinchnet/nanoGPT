@@ -265,48 +265,48 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
 
-   def compute_secondary_embedding(self, x, pos):
-    """
-    Computes a secondary embedding by applying a unique RoPE frequency matrix 
-    centered on each index, multiplying it by the embeddings of all other tokens, 
-    aggregating phase shifts, and finally returning the magnitude after a complex shift.
+    def compute_secondary_embedding(self, x, pos):
+        """
+        Computes a secondary embedding by applying a unique RoPE frequency matrix 
+        centered on each index, multiplying it by the embeddings of all other tokens, 
+        aggregating phase shifts, and finally returning the magnitude after a complex shift.
+        
+        x:  (B, T, n_embd)  <-- token+pos used as real part
+        pos: (T,)           <-- positions from 0..T-1
+        
+        Returns:
+          x2: (B, T, n_embd), representing the transformed magnitude embedding.
+        """
+        B, T, C = x.shape
+        device = x.device
+        head_dim = C // self.config.n_head  # Assuming head_dim is C divided by the number of heads
     
-    x:  (B, T, n_embd)  <-- token+pos used as real part
-    pos: (T,)           <-- positions from 0..T-1
+        # Generate unique RoPE frequency matrix for each index
+        rope_freqs = torch.zeros((T, head_dim), device=device)
+        for i in range(T):
+            # Generate a RoPE frequency spectrum centered on i
+            rope_freqs[i] = 1.0 / (10000 ** ((torch.arange(head_dim, device=device).float() / head_dim) + i / T))
     
-    Returns:
-      x2: (B, T, n_embd), representing the transformed magnitude embedding.
-    """
-    B, T, C = x.shape
-    device = x.device
-    head_dim = C // self.config.n_head  # Assuming head_dim is C divided by the number of heads
-
-    # Generate unique RoPE frequency matrix for each index
-    rope_freqs = torch.zeros((T, head_dim), device=device)
-    for i in range(T):
-        # Generate a RoPE frequency spectrum centered on i
-        rope_freqs[i] = 1.0 / (10000 ** ((torch.arange(head_dim, device=device).float() / head_dim) + i / T))
-
-    # Expand the RoPE matrix so it can be applied across batches and heads
-    rope_freqs = rope_freqs.unsqueeze(0).expand(B, -1, -1)  # (B, T, head_dim)
-
-    # Extract real and imaginary parts (treat x as real, apply RoPE to get imaginary)
-    real_part = x  # Real component
-    imag_part = torch.sin(pos.float().unsqueeze(0).unsqueeze(-1) * rope_freqs)  # (B, T, C)
-
-    # Phase shift computation
-    # Multiply embeddings by RoPE-transformed values of all other tokens
-    shift_matrix = torch.einsum('btc,bsc->btsc', real_part, imag_part)  # (B, T, S, C)
-    phase_shifts = shift_matrix.sum(dim=2)  # Sum over sequence positions (B, T, C)
-
-    # Apply the complex transformation
-    shifted_real = real_part * phase_shifts.cos() - imag_part * phase_shifts.sin()
-    shifted_imag = real_part * phase_shifts.sin() + imag_part * phase_shifts.cos()
-
-    # Compute the magnitude as the final x2 embedding
-    x2 = torch.sqrt(shifted_real**2 + shifted_imag**2 + 1e-8)  # Avoid division by zero
-
-    return x2  # Shape (B, T, n_embd)
+        # Expand the RoPE matrix so it can be applied across batches and heads
+        rope_freqs = rope_freqs.unsqueeze(0).expand(B, -1, -1)  # (B, T, head_dim)
+    
+        # Extract real and imaginary parts (treat x as real, apply RoPE to get imaginary)
+        real_part = x  # Real component
+        imag_part = torch.sin(pos.float().unsqueeze(0).unsqueeze(-1) * rope_freqs)  # (B, T, C)
+    
+        # Phase shift computation
+        # Multiply embeddings by RoPE-transformed values of all other tokens
+        shift_matrix = torch.einsum('btc,bsc->btsc', real_part, imag_part)  # (B, T, S, C)
+        phase_shifts = shift_matrix.sum(dim=2)  # Sum over sequence positions (B, T, C)
+    
+        # Apply the complex transformation
+        shifted_real = real_part * phase_shifts.cos() - imag_part * phase_shifts.sin()
+        shifted_imag = real_part * phase_shifts.sin() + imag_part * phase_shifts.cos()
+    
+        # Compute the magnitude as the final x2 embedding
+        x2 = torch.sqrt(shifted_real**2 + shifted_imag**2 + 1e-8)  # Avoid division by zero
+    
+        return x2  # Shape (B, T, n_embd)
 
     def forward(
         self,
