@@ -110,8 +110,7 @@ class CausalSelfAttention(nn.Module):
             q2 = q2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
             k2 = k2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
             v2 = v2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-            if self.use_rope and self.rope_freqs is not None:
-                q2, k2 = self.apply_rope(q2, k2)
+ 
 
             if self.flash:
                 att2 = F.scaled_dot_product_attention(q2, k2, v2, attn_mask=None,
@@ -325,8 +324,7 @@ class GPT(nn.Module):
             # Using einsum: treat phase_emb as (T, T, C) and x as (B, T, C) so that we sum over j.
             phi = torch.einsum('ijc,bjc->bic', phase_emb, tok_emb)
             phi = phi / (T ** 0.5)
-            phi = phi + pos_emb.unsqueeze(0)
-            x2 = tok_emb + phi
+            x2 = phi + tok_emb
             return x2
 
 
