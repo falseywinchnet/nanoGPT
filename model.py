@@ -316,8 +316,7 @@ class GPT(nn.Module):
         magnitude = torch.sqrt(real_part**2 + imag_part**2 + 1e-8)
         # That magnitude is the secondary embedding x2
         return magnitude
-
-     def forward(
+    def forward(
         self,
         idx,
         targets=None,
@@ -482,7 +481,7 @@ class GPT(nn.Module):
         return x
     
         
-        def crop_block_size(self, block_size):
+    def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
         # e.g. we may load the GPT2 pretrained model checkpoint (block size 1024)
         # but want to use a smaller block size for some smaller, simpler model
