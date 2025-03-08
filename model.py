@@ -110,7 +110,8 @@ class CausalSelfAttention(nn.Module):
             q2 = q2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
             k2 = k2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
             v2 = v2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-
+            if self.use_rope and self.rope_freqs is not None:
+                q2, k2 = self.apply_rope(q2, k2)
 
             if self.flash:
                 att2 = F.scaled_dot_product_attention(q2, k2, v2, attn_mask=None,
