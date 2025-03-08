@@ -264,6 +264,7 @@ class GPT(nn.Module):
 
 
     def compute_secondary_embedding(self, x, pos):
+        print(x.shape,pos.shape)
             """
             Computes a secondary embedding for each token by accumulating phase shifts.
             
