@@ -411,7 +411,7 @@ class GPT(nn.Module):
 
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
-        pos = torch.arange(t, dtype=torch.long, device=device) % self.config.block_size
+        pos = torch.arange(t, dtype=torch.long, device=device)
         pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
 
         # If we have an override for the last token's embedding
@@ -426,7 +426,7 @@ class GPT(nn.Module):
         # we generate x2 each time because the sequence might be extended.
         x2 = None
         if self.config.use_secondary_embed:
-            x2 = self.compute_secondary_embedding(tok_emb, pos)  
+            x2 = self.compute_secondary_embedding(tok_emb, pos_emb)  
             # For simplicity, in your code you might pass x2 into the blocks, 
             # but here we have not extended CausalSelfAttention to handle x2. 
             # If you have that code, you'd route x2 into it. 
