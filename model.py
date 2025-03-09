@@ -111,6 +111,124 @@ class CausalSelfAttention(nn.Module):
 
 
 
+class CausalSelfAttentionPair(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        self.flash = hasattr(F, 'scaled_dot_product_attention')
+        self.use_rope = config.use_rope
+        self.noise_alpha = config.noise_alpha
+        
+        # ---- Primary Q,K,V ----
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        # ---- Secondary Q,K,V if use_secondary_embed is enabled ----
+        if config.use_secondary_embed:
+            self.c_attn_2 = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        
+        # Output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        
+        # Dropouts
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+        
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                        .view(1, 1, config.block_size, config.block_size))
+
+    def apply_rope(self, q, k):
+        """Applies RoPE to queries and keys."""
+        B, H, S, D = q.shape
+        rope_freqs = self.rope_freqs.to(q.device, q.dtype)
+        positions = torch.arange(S, device=q.device, dtype=q.dtype).unsqueeze(1)
+        theta = positions * rope_freqs.unsqueeze(0)  # shape [S, D/2]
+        sin_theta, cos_theta = theta.sin(), theta.cos()
+
+        sin_theta = sin_theta.expand(B, H, S, D // 2)
+        cos_theta = cos_theta.expand(B, H, S, D // 2)
+
+        q1, q2 = q[..., 0::2], q[..., 1::2]
+        k1, k2 = k[..., 0::2], k[..., 1::2]
+        q = torch.cat([q1*cos_theta - q2*sin_theta, q1*sin_theta + q2*cos_theta], dim=-1)
+        k = torch.cat([k1*cos_theta - k2*sin_theta, k1*sin_theta + k2*cos_theta], dim=-1)
+        return q, k
+
+    def forward(self, x, x2=None, rope_freqs=None):
+        """
+        x:  (B, T, C) primary embeddings
+        x2: (B, T, C) secondary embeddings (if any)
+        """
+        B, T, C = x.size()
+
+
+        # ---- Primary pass Q,K,V ----
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+
+        noise = torch.randn_like(q) * self.noise_alpha
+        v_pos = v + noise
+        v_neg = v - noise
+
+        if self.use_rope and rope_freqs is not None:
+            self.rope_freqs = rope_freqs
+            q, k = self.apply_rope(q, k)
+
+        # Compute attention for the primary embedding
+        if self.flash:
+            att_pos = F.scaled_dot_product_attention(q, k, v_pos, attn_mask=None,
+                        dropout_p=self.dropout if self.training else 0, is_causal=True)
+            att_neg = F.scaled_dot_product_attention(q, k, v_neg, attn_mask=None,
+                        dropout_p=self.dropout if self.training else 0, is_causal=True)
+        else:
+            att_scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att_scores = att_scores.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            att_probs = F.softmax(att_scores, dim=-1)
+            att_probs = self.attn_dropout(att_probs)
+            att_pos = att_probs @ v_pos
+            att_neg = att_probs @ v_neg
+        
+        y_primary = (att_pos + att_neg) / 2  # (B, n_head, T, head_dim)
+
+        # ---- Secondary pass if x2 is given ----
+        if (x2 is not None):
+            # c_attn_2 -> Q2,K2,V2
+            q2, k2, v2 = self.c_attn_2(x2).split(self.n_embd, dim=2)
+            q2 = q2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+            k2 = k2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+            v2 = v2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+            if self.use_rope:
+                q2, k3 = self.apply_rope(q2, k2)
+
+
+            if self.flash:
+                att2 = F.scaled_dot_product_attention(q2, k2, v2, attn_mask=None,
+                           dropout_p=self.dropout if self.training else 0, is_causal=True)
+            else:
+                att_scores2 = (q2 @ k2.transpose(-2, -1)) * (1.0 / math.sqrt(k2.size(-1)))
+                att_scores2 = att_scores2.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+                att_probs2 = F.softmax(att_scores2, dim=-1)
+                att_probs2 = self.attn_dropout(att_probs2)
+                att2 = att_probs2 @ v2
+            
+            # Combine primary + secondary stream
+            y_secondary = att2  # shape (B, n_head, T, head_dim)
+            y = (y_primary + y_secondary) / 2
+        else:
+            # No x2 => just use primary
+            y = y_primary
+
+        # Reshape
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        # Output projection
+        y = self.resid_dropout(self.c_proj(y))
+        return y
+
 class RainstarActivation(nn.Module):
     def __init__(self, gammaval=8):
         super().__init__()
@@ -155,11 +273,13 @@ class ResBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_r = LayerNorm(config.n_embd, bias=config.bias)
+
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
+        self.attn = CausalSelfAttentionPair(config)
         self.mlp = MLP(config)
     
-    def forward(self, x, rope_freqs, num_iterations=3):
+    def forward(self, x,x2, rope_freqs, num_iterations=3):
         """
         Iteratively apply attention and MLP with residuals over multiple steps.
         """
@@ -168,7 +288,8 @@ class ResBlock(nn.Module):
 
             # Apply normalization and attention (using the residual)
             x = self.ln_1(x)
-            x = self.attn(x, rope_freqs)
+            x2 = self.ln_r(x2)
+            x = self.attn(x,x2, rope_freqs)
 
             # Apply normalization and MLP (using the residual)
             x = self.ln_2(x)
@@ -201,6 +322,7 @@ class GPT(nn.Module):
         self.config = config
         self.ln_x = LayerNorm(config.n_embd, bias=config.bias)
         self.ln_y = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_R = LayerNorm(config.n_embd, bias=config.bias)
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -415,10 +537,10 @@ class GPT(nn.Module):
         for i, block in enumerate(self.transformer.preludey):
             residualy = block(y, rope_freqs=self.rope_freqs)  
 
-        x = x + self.ln_y(residualy)
         # Pass through each block
         for i, block in enumerate(self.transformer.residual):
-            x = block(x+residual, rope_freqs=self.rope_freqs)
+            x = block(x+residual, residualy, rope_freqs=self.rope_freqs)
+            residualy = residualy + self.ln_R(x)
 
                     
         for i, block in enumerate(self.transformer.coda):
