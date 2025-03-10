@@ -151,10 +151,100 @@ class ComplexConditionalVRNNCell(nn.Module):
         rnn_input = torch.cat([x, z], dim=-1)
         h_new = self.rnn(rnn_input, h_prev)
 
-        # Compute KL divergence (per data point, ignoring constants)
-        kl = 0.5 * torch.sum(sigma_enc**2 + (mu_enc - mu_prior)**2 - 1 - 2 * log_sigma_enc + 2 * log_sigma_prior, dim=-1)
-        return x_hat, h_new, z, kl
+        return x_hat, h_new, z
 
+
+from collections import deque
+
+def auto_regressive_predict(cell, h_init, steps, top_k=5, n_candidates=20):
+    """
+    Auto-regressively predict future timesteps by sampling latent vectors from the VRNN prior.
+    
+    Args:
+        cell: a conditional VRNN cell (e.g. ComplexConditionalVRNNCell) that in inference mode uses
+              its prior network to generate latents.
+        h_init: (B, h_dim) final hidden state from ingestion.
+        steps: number of future timesteps to predict.
+        top_k: branching factor: number of top candidates to retain at each step.
+        n_candidates: number of latent samples to draw at each step.
+        
+    Returns:
+        pred_seq: (B, steps, x_dim) predicted extension, produced by averaging latent z’s across branches
+                  and then decoding.
+    """
+    B = h_init.size(0)
+    # Initialize a queue to hold branches.
+    # Each branch is a tuple: (latent_seq, h, cumulative_logp, last_x)
+    # last_x is the most recent predicted output (used as input for the next step)
+    last_x = torch.zeros(B, cell.x_dim, device=h_init.device)  # start with zeros
+    queue = deque()
+    # Start with an empty latent sequence and initial hidden state.
+    queue.append(([], h_init, torch.zeros(B, device=h_init.device), last_x))
+    
+    for _ in range(steps):
+        next_branches = []
+        while queue:
+            latent_seq, h, cum_logp, last_x = queue.popleft()
+            # Use the prior network to get distribution parameters from h.
+            prior_out = cell.prior_net(h)  # (B, 2*z_dim)
+            mu_prior, log_sigma_prior = prior_out.chunk(2, dim=-1)
+            sigma_prior = torch.exp(log_sigma_prior)
+            # Sample n_candidates latent vectors.
+            eps = torch.randn(B, n_candidates, cell.z_dim, device=h.device)
+            z_candidates = mu_prior.unsqueeze(1) + sigma_prior.unsqueeze(1) * eps  # (B, n_candidates, z_dim)
+            # Compute (unnormalized) log probability for each candidate under the prior.
+            diff = (z_candidates - mu_prior.unsqueeze(1)) / (sigma_prior.unsqueeze(1) + 1e-8)
+            candidate_logp = -0.5 * torch.sum(diff**2, dim=-1)  # (B, n_candidates)
+            # Add the cumulative logp so far.
+            candidate_logp = cum_logp.unsqueeze(1) + candidate_logp  # (B, n_candidates)
+            # For each batch element, select the top_k latent samples.
+            topk_logp, topk_idx = candidate_logp.topk(k=top_k, dim=1)
+            # Gather the corresponding latent candidates.
+            z_topk = torch.gather(z_candidates, 1, topk_idx.unsqueeze(-1).expand(-1, -1, cell.z_dim))  # (B, top_k, z_dim)
+            
+            # For each candidate branch, decode and update hidden state.
+            # Flatten the candidates for processing.
+            z_flat = z_topk.view(B * top_k, cell.z_dim)
+            h_flat = h.repeat_interleave(top_k, dim=0)  # (B*top_k, h_dim)
+            # Decode: using the cell's decoder.
+            dec_in = torch.cat([z_flat, h_flat], dim=-1)
+            x_dec = cell.dec_net(dec_in)  # (B*top_k, x_dim)
+            # Update hidden state via the RNN update.
+            rnn_in = torch.cat([x_dec, z_flat], dim=-1)
+            h_new = cell.rnn(rnn_in, h_flat)  # (B*top_k, h_dim)
+            
+            # Reshape the new hidden state and decoded output.
+            h_new = h_new.view(B, top_k, -1)       # (B, top_k, h_dim)
+            x_dec = x_dec.view(B, top_k, -1)       # (B, top_k, x_dim)
+            # For each candidate branch, extend the latent sequence.
+            for i in range(top_k):
+                new_latent_seq = latent_seq + [z_topk[:, i, :]]  # list of (B, z_dim)
+                new_cum_logp = topk_logp[:, i]  # (B,)
+                new_last_x = x_dec[:, i, :]     # (B, x_dim)
+                # Append this branch.
+                next_branches.append((new_latent_seq, h_new[:, i, :], new_cum_logp, new_last_x))
+        # Prune branches: sort by average cumulative logp (higher is better)
+        next_branches = sorted(next_branches, key=lambda tup: tup[2].mean().item(), reverse=True)[:top_k]
+        queue = deque(next_branches)
+    
+    # After all steps, each branch has a list of latent z's of length 'steps'.
+    # Stack them: for each branch, latent_seq becomes (B, steps, z_dim).
+    latent_seqs = [torch.stack(branch[0], dim=1) for branch in queue]  # list of (B, steps, z_dim)
+    # Average across branches.
+    avg_latent_seq = torch.stack(latent_seqs, dim=0).mean(dim=0)  # (B, steps, z_dim)
+    
+    # Now decode the averaged latent sequence to produce the final predicted extension.
+    decoded_steps = []
+    # Here we use a placeholder hidden state (zeros) for decoding.
+    h_placeholder = torch.zeros(B, cell.h_dim, device=avg_latent_seq.device)
+    for t in range(steps):
+        z_t = avg_latent_seq[:, t, :]  # (B, z_dim)
+        dec_in = torch.cat([z_t, h_placeholder], dim=-1)  # (B, z_dim + h_dim)
+        x_t = cell.dec_net(dec_in)  # (B, x_dim)
+        decoded_steps.append(x_t)
+    pred_seq = torch.stack(decoded_steps, dim=1)  # (B, steps, cell.x_dim)
+    return pred_seq
+            
 # ---------------------------------------------------------------------------
 # Ingestion phase: process the observed sequence with the conditional VRNN.
 def ingest_sequence(cell, x_complex):
@@ -171,70 +261,12 @@ def ingest_sequence(cell, x_complex):
     kl_list = []
     for t in range(T):
         x_t = x_complex[:, t, :]  # (B, x_dim)
-        x_hat, h, z, kl = cell(x_t, h)
+        x_hat, h, z = cell(x_t, h)
         x_hat_list.append(x_hat)
-        kl_list.append(kl)
     x_hat_seq = torch.stack(x_hat_list, dim=1)
-    kl_seq = torch.stack(kl_list, dim=1)
-    return x_hat_seq, h, kl_seq
+    return x_hat_seq, h
 
-def auto_regressive_predict(cell, h_init, steps, top_k=5):
-    """
-    h_init: (B, h_dim) — final hidden state from ingestion
-    steps: number of future timesteps to predict
-    top_k: branching factor
-    
-    Returns:
-       pred_seq: (B, steps, x_dim) — predicted extension (complex), 
-                 obtained by averaging latent z's and then decoding.
-                 
-    This version collects latent z values (from q(z|x,h)) at each step,
-    averages them across the top-k branches, and then uses the decoder (dec_net)
-    with a placeholder hidden (e.g. zeros) to produce the final predicted x.
-    """
-    B = h_init.size(0)
-    # Use a zero vector as a starting placeholder input.
-    x_start = torch.zeros(B, cell.x_dim, device=h_init.device)
-    from collections import deque
-    queue = deque()
-    # Each element is a tuple:
-    # (list of latent z's for each predicted step, current hidden state, cumulative KL, last input used)
-    queue.append(([], h_init, 0.0, x_start))
-    
-    for _ in range(steps):
-        next_queue = []
-        while queue:
-            latent_seq_so_far, h_prev, kl_so_far, last_x = queue.popleft()
-            # Run one step of the cell.
-            # Note: cell returns (x_hat, h_new, z, kl) where:
-            #  - z is the latent variable sampled from q(z|x,h)
-            x_hat, h_new, z, kl = cell(last_x, h_prev)
-            new_latent_seq = latent_seq_so_far + [z]  # Append latent for this timestep.
-            new_kl = kl_so_far + kl.item()  # Accumulate KL divergence (convert to scalar if needed)
-            # For the next step, we use the decoded x_hat as input.
-            next_queue.append((new_latent_seq, h_new, new_kl, x_hat))
-        # Keep only the top_k branches (lowest cumulative KL).
-        next_queue = sorted(next_queue, key=lambda tup: tup[2])[:top_k]
-        queue = deque(next_queue)
-    
-    # Now, each branch has a sequence of latent z's, one per predicted timestep.
-    # Each latent is of shape (B, z_dim); stacking along time gives (B, steps, z_dim).
-    all_latent_seqs = [torch.stack(latent_seq, dim=1) for latent_seq, h, kl, x in queue]
-    # Average the latent sequences across branches.
-    avg_latent_seq = torch.stack(all_latent_seqs, dim=0).mean(dim=0)  # (B, steps, z_dim)
-    
-    # Now decode each averaged latent z into x using the decoder network.
-    # We need to provide some hidden context; here we use a placeholder (e.g. zeros).
-    B, L, z_dim = avg_latent_seq.shape
-    h_placeholder = torch.zeros(B, cell.h_dim, device=avg_latent_seq.device)
-    decoded_steps = []
-    for t in range(L):
-        z_t = avg_latent_seq[:, t, :]  # (B, z_dim)
-        dec_in = torch.cat([z_t, h_placeholder], dim=-1)  # (B, z_dim + h_dim)
-        x_t = cell.dec_net(dec_in)  # (B, x_dim)
-        decoded_steps.append(x_t)
-    pred_seq = torch.stack(decoded_steps, dim=1)  # (B, steps, x_dim)
-    return pred_seq
+
 
 
 
