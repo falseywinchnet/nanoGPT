@@ -224,17 +224,18 @@ def auto_regressive_predict(cell, h_init, steps, top_k=5, n_candidates=20):
                 next_branches.append((new_latent_seq, h_new[:, i, :], new_cum_logp, new_last_x))
             # Prune branches: sort by average cumulative logp (higher is better)
             # Convert list of tuples to tensors
-            # Convert list of tuples to tensors
+
             cumulative_logps = torch.stack([tup[2] for tup in next_branches])  # (num_branches,)
             
             # Sort using PyTorch's built-in sorting
             _, top_indices = torch.sort(cumulative_logps, descending=True)
             
             # Convert top_indices to a Python list before using it for indexing
-            top_indices = top_indices[:top_k].tolist()
+            top_indices = top_indices[:top_k].tolist()  # This is now a Python list of integers
             
-            # Select top_k branches one-by-one using list comprehension
-            next_branches = [next_branches[i.item()] for i in top_indices]
+            # Select top_k branches using list comprehension
+            next_branches = [next_branches[i] for i in top_indices]  # No need for .item()
+
 
             queue = deque(next_branches)
     
