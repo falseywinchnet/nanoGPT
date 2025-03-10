@@ -126,7 +126,6 @@ class ComplexConditionalVRNNCell(nn.Module):
           x_hat: predicted x (B, x_dim)
           h_new: updated hidden state (B, h_dim)
           z: sampled latent (B, z_dim)
-          kl: approximate KL divergence term (B,)
         """
         # Inference: condition on x and h_prev
         enc_input = torch.cat([x, h_prev], dim=-1)
@@ -253,12 +252,10 @@ def ingest_sequence(cell, x_complex):
     Returns:
        x_hat_seq: (B, T, x_dim) — sequence of decoded predictions (for reconstruction)
        h_final: (B, h_dim) — final hidden state after ingestion
-       kl_seq: (B, T) — per-timestep KL divergence terms
     """
     B, T, _ = x_complex.shape
     h = torch.zeros(B, cell.h_dim, device=x_complex.device)
     x_hat_list = []
-    kl_list = []
     for t in range(T):
         x_t = x_complex[:, t, :]  # (B, x_dim)
         x_hat, h, z = cell(x_t, h)
@@ -334,7 +331,7 @@ class CausalSelfAttention(nn.Module):
         h = torch.zeros(B, self.cond_vrnn.h_dim, device=x.device)
         for t in range(T):
             x_t = x_complex[:, t, :]  # (B, 2C)
-            x_hat, h, z, kl = self.cond_vrnn(x_t, h)
+            x_hat, h, z = self.cond_vrnn(x_t, h)
             
         pred_complex = auto_regressive_predict(self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
 
