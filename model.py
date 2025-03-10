@@ -257,8 +257,8 @@ class CausalSelfAttention(nn.Module):
                                         .view(1, 1, config.block_size, config.block_size))
         self.vrnn_cell = VRNNCellPriorOnly(
             x_dim=config.n_embd,   # same as model embedding size
-            h_dim=256,
-            z_dim=128
+            h_dim=32,
+            z_dim=16
         )
         # 2) A small linear map from (n_embd) -> (h_dim) to get h_init from x
         self.map_x_to_h = nn.Linear(config.n_embd, 256, bias=False)
