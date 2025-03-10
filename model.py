@@ -222,9 +222,16 @@ def auto_regressive_predict(cell, h_init, steps, top_k=5, n_candidates=20):
                 new_last_x = x_dec[:, i, :]     # (B, x_dim)
                 # Append this branch.
                 next_branches.append((new_latent_seq, h_new[:, i, :], new_cum_logp, new_last_x))
-        # Prune branches: sort by average cumulative logp (higher is better)
-        next_branches = sorted(next_branches, key=lambda tup: tup[2].mean().item(), reverse=True)[:top_k]
-        queue = deque(next_branches)
+            # Prune branches: sort by average cumulative logp (higher is better)
+            # Convert list of tuples to tensors
+            cumulative_logps = torch.stack([tup[2] for tup in next_branches])  # (num_branches,)
+            
+            # Sort using PyTorch's built-in sorting, which keeps computation inside the graph
+            _, top_indices = torch.sort(cumulative_logps, descending=True)
+            
+            # Select top_k branches using tensor indexing
+            next_branches = [next_branches[i] for i in top_indices[:top_k]]
+            queue = deque(next_branches)
     
     # After all steps, each branch has a list of latent z's of length 'steps'.
     # Stack them: for each branch, latent_seq becomes (B, steps, z_dim).
