@@ -332,10 +332,10 @@ class CausalSelfAttention(nn.Module):
             att_pos = att_probs @ v_pos
             att_neg = att_probs @ v_neg
         
-        y_primary = (att_pos + att_neg) / 2  # (B, n_head, T, head_dim)
+        y_primary = (att_pos + att_neg) / 2  # (B, n_head, T_aug, head_dim)
 
         # Reshape
-        y = y_primary.transpose(1, 2).contiguous().view(B, T, C)
+        y = y_primary.transpose(1, 2).contiguous().view(B, T_aug, C)
         y = y[:, :T, :]  # (B, T, C)
 
         # Output projection
