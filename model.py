@@ -17,216 +17,159 @@ class LayerNorm(nn.Module):
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
-class VRNNCellPriorOnly(nn.Module):
-    """
-    A minimal VRNN cell that, given h_{t-1},
-     - samples z_t ~ p(z_t | h_{t-1})
-     - decodes z_t into x_t
-     - updates h_t from (x_t, z_t)
-
-    We'll also provide a method to sample multiple candidates
-    (and pick top-k) so we can branch.
-    """
-
+class ComplexConditionalVRNNCell(nn.Module):
     def __init__(self, x_dim, h_dim, z_dim):
+        """
+        x_dim: dimension of complex input (i.e. 2 * embed_dim)
+        h_dim: hidden state dimension
+        z_dim: latent variable dimension
+        """
         super().__init__()
         self.x_dim = x_dim
         self.h_dim = h_dim
         self.z_dim = z_dim
 
-        # p(z_t | h_{t-1})
+        # Inference network: q(z_t | x_t, h_{t-1})
+        self.enc_net = nn.Sequential(
+            nn.Linear(x_dim + h_dim, 2 * z_dim),
+            nn.Tanh(),
+            nn.Linear(2 * z_dim, 2 * z_dim)
+        )
+        # Prior network: p(z_t | h_{t-1})
         self.prior_net = nn.Sequential(
-            nn.Linear(h_dim, 2*z_dim),  # => mu, log_sigma
+            nn.Linear(h_dim, 2 * z_dim),
             nn.Tanh(),
-            nn.Linear(2*z_dim, 2*z_dim),
+            nn.Linear(2 * z_dim, 2 * z_dim)
         )
-
-        # x_t = dec(z_t, h_{t-1})
+        # Decoder network: decodes x_t from [z_t, h_{t-1}]
         self.dec_net = nn.Sequential(
-            nn.Linear(z_dim + h_dim, 2*x_dim),
+            nn.Linear(z_dim + h_dim, 2 * x_dim),
             nn.Tanh(),
-            nn.Linear(2*x_dim, x_dim),
+            nn.Linear(2 * x_dim, x_dim)
         )
-
-        # RNN to update hidden state from (x_t, z_t)
+        # RNN update: updates hidden state from [x_t, z_t]
         self.rnn = nn.GRUCell(x_dim + z_dim, h_dim)
+        self.activation = ReferenceActivation()
 
-    def sample_topk(self, h_prev, top_k=5, n_candidates=20):
+    def forward(self, x, h_prev):
         """
-        From hidden state h_prev, sample n_candidates latents,
-        pick the top_k under the prior probability.
-
-        Returns a list of length top_k, each entry is:
-           (z_t, x_t, h_t, logp_t)
-        where:
-           z_t: (B, z_dim)
-           x_t: (B, x_dim)
-           h_t: (B, h_dim)
-           logp_t: (B,) approximate log-prob
+        Args:
+          x: (B, x_dim) — current complex input (real and imag concatenated)
+          h_prev: (B, h_dim) — previous hidden state
+        Returns:
+          x_hat: predicted x (B, x_dim)
+          h_new: updated hidden state (B, h_dim)
+          z: sampled latent (B, z_dim)
+          kl: approximate KL divergence term (B,)
         """
-        B = h_prev.size(0)
+        # Inference: condition on x and h_prev
+        enc_input = torch.cat([x, h_prev], dim=-1)
+        enc_out = self.enc_net(enc_input)
+        mu_enc, log_sigma_enc = enc_out.chunk(2, dim=-1)
+        sigma_enc = torch.exp(log_sigma_enc)
 
-        # 1) prior distribution
-        prior_out = self.prior_net(h_prev)  # (B, 2*z_dim)
-        mu_p, log_sigma_p = prior_out.chunk(2, dim=-1)  # each (B, z_dim)
-        sigma_p = torch.exp(log_sigma_p)
+        # Sample latent from q(z|x,h)
+        eps = torch.randn_like(sigma_enc)
+        z = mu_enc + sigma_enc * eps
 
-        # 2) sample latents
-        eps = torch.randn(B, n_candidates, self.z_dim, device=h_prev.device)
-        mu_p_expand = mu_p.unsqueeze(1)         # (B,1,z_dim)
-        sigma_p_expand = sigma_p.unsqueeze(1)   # (B,1,z_dim)
-        z_samples = mu_p_expand + sigma_p_expand * eps  # (B,n_candidates,z_dim)
+        # Prior from h_prev
+        prior_out = self.prior_net(h_prev)
+        mu_prior, log_sigma_prior = prior_out.chunk(2, dim=-1)
+        sigma_prior = torch.exp(log_sigma_prior)
 
-        # 3) approximate log-prob under p(z|h_prev)
-        #    ignoring constants: -0.5 * sum(((z - mu)/sigma)^2)
-        diff = (z_samples - mu_p_expand) / (sigma_p_expand+1e-8)
-        logp = -0.5 * diff.pow(2).sum(dim=-1)  # (B, n_candidates)
+        # Decode: predict x_hat
+        dec_input = torch.cat([z, h_prev], dim=-1)
+        x_hat = self.dec_net(dec_input)
 
-        # 4) pick top_k
-        topk_logp, topk_idx = torch.topk(logp, k=top_k, dim=1)  # each (B, top_k)
-        # gather z
-        z_topk = z_samples.gather(
-            1, topk_idx.unsqueeze(-1).expand(-1, -1, self.z_dim)
-        )  # (B, top_k, z_dim)
+        # Update hidden state
+        rnn_input = torch.cat([x, z], dim=-1)
+        h_new = self.rnn(rnn_input, h_prev)
 
-        # decode & update hidden for each candidate
-        expansions = []
-        # Flatten to decode
-        z_flat = z_topk.view(B*top_k, self.z_dim)
-        h_prev_flat = h_prev.repeat_interleave(top_k, dim=0)  # (B*top_k, h_dim)
+        # Compute KL divergence (per data point, ignoring constants)
+        kl = 0.5 * torch.sum(sigma_enc**2 + (mu_enc - mu_prior)**2 - 1 - 2 * log_sigma_enc + 2 * log_sigma_prior, dim=-1)
+        return x_hat, h_new, z, kl
 
-        dec_in = torch.cat([z_flat, h_prev_flat], dim=1)  # (B*top_k, z_dim + h_dim)
-        x_flat = self.dec_net(dec_in)  # => (B*top_k, x_dim)
-
-        # Update hidden
-        rnn_in = torch.cat([x_flat, z_flat], dim=1) # => (B*top_k, x_dim+z_dim)
-        h_next_flat = self.rnn(rnn_in, h_prev_flat) # => (B*top_k, h_dim)
-
-        # reshape back
-        x_topk = x_flat.view(B, top_k, self.x_dim)
-        h_topk = h_next_flat.view(B, top_k, self.h_dim)
-
-        for i in range(top_k):
-            expansions.append((
-                z_topk[:, i, :],    # (B, z_dim)
-                x_topk[:, i, :],    # (B, x_dim)
-                h_topk[:, i, :],    # (B, h_dim)
-                topk_logp[:, i],    # (B,)
-            ))
-
-        return expansions
-
-from collections import deque
-
-def vrnn_bfs_z(cell, h_init, top_k=5, steps=5):
+# ---------------------------------------------------------------------------
+# Ingestion phase: process the observed sequence with the conditional VRNN.
+def ingest_sequence(cell, x_complex):
     """
-    Expand a VRNN for 'steps' time steps, branching factor = top_k each step.
-    Return the complete set of final paths, each path containing:
-       ( list_of_z, list_of_x, total_logp )
+    x_complex: (B, T, x_dim) — the input sequence (complex)
+    Returns:
+       x_hat_seq: (B, T, x_dim) — sequence of decoded predictions (for reconstruction)
+       h_final: (B, h_dim) — final hidden state after ingestion
+       kl_seq: (B, T) — per-timestep KL divergence terms
+    """
+    B, T, _ = x_complex.shape
+    h = torch.zeros(B, cell.h_dim, device=x_complex.device)
+    x_hat_list = []
+    kl_list = []
+    for t in range(T):
+        x_t = x_complex[:, t, :]  # (B, x_dim)
+        x_hat, h, z, kl = cell(x_t, h)
+        x_hat_list.append(x_hat)
+        kl_list.append(kl)
+    x_hat_seq = torch.stack(x_hat_list, dim=1)
+    kl_seq = torch.stack(kl_list, dim=1)
+    return x_hat_seq, h, kl_seq
 
-    cell: a VRNNCellPriorOnly
-    h_init: (B, h_dim)
+def auto_regressive_predict(cell, h_init, steps, top_k=5):
+    """
+    h_init: (B, h_dim) — final hidden state from ingestion
+    steps: number of future timesteps to predict
     top_k: branching factor
-    steps: depth
-
-    BFS approach: queue items are ( list_of_z, list_of_x, h, sum_logp )
+    
+    Returns:
+       pred_seq: (B, steps, x_dim) — predicted extension (complex), 
+                 obtained by averaging latent z's and then decoding.
+                 
+    This version collects latent z values (from q(z|x,h)) at each step,
+    averages them across the top-k branches, and then uses the decoder (dec_net)
+    with a placeholder hidden (e.g. zeros) to produce the final predicted x.
     """
     B = h_init.size(0)
+    # Use a zero vector as a starting placeholder input.
+    x_start = torch.zeros(B, cell.x_dim, device=h_init.device)
+    from collections import deque
     queue = deque()
-    # Start with no latents yet
-    queue.append(([], [], h_init, torch.zeros(B, device=h_init.device)))
-
-    for _step in range(steps):
-        next_queue = deque()
+    # Each element is a tuple:
+    # (list of latent z's for each predicted step, current hidden state, cumulative KL, last input used)
+    queue.append(([], h_init, 0.0, x_start))
+    
+    for _ in range(steps):
+        next_queue = []
         while queue:
-            partial_z, partial_x, h_prev, logp_so_far = queue.popleft()
-            # Expand top_k from current h_prev
-            expansions = cell.sample_topk(h_prev, top_k=top_k)
-            # expansions: list of length top_k
-            # each is (z_t, x_t, h_t, logp_t)
+            latent_seq_so_far, h_prev, kl_so_far, last_x = queue.popleft()
+            # Run one step of the cell.
+            # Note: cell returns (x_hat, h_new, z, kl) where:
+            #  - z is the latent variable sampled from q(z|x,h)
+            x_hat, h_new, z, kl = cell(last_x, h_prev)
+            new_latent_seq = latent_seq_so_far + [z]  # Append latent for this timestep.
+            new_kl = kl_so_far + kl.item()  # Accumulate KL divergence (convert to scalar if needed)
+            # For the next step, we use the decoded x_hat as input.
+            next_queue.append((new_latent_seq, h_new, new_kl, x_hat))
+        # Keep only the top_k branches (lowest cumulative KL).
+        next_queue = sorted(next_queue, key=lambda tup: tup[2])[:top_k]
+        queue = deque(next_queue)
+    
+    # Now, each branch has a sequence of latent z's, one per predicted timestep.
+    # Each latent is of shape (B, z_dim); stacking along time gives (B, steps, z_dim).
+    all_latent_seqs = [torch.stack(latent_seq, dim=1) for latent_seq, h, kl, x in queue]
+    # Average the latent sequences across branches.
+    avg_latent_seq = torch.stack(all_latent_seqs, dim=0).mean(dim=0)  # (B, steps, z_dim)
+    
+    # Now decode each averaged latent z into x using the decoder network.
+    # We need to provide some hidden context; here we use a placeholder (e.g. zeros).
+    B, L, z_dim = avg_latent_seq.shape
+    h_placeholder = torch.zeros(B, cell.h_dim, device=avg_latent_seq.device)
+    decoded_steps = []
+    for t in range(L):
+        z_t = avg_latent_seq[:, t, :]  # (B, z_dim)
+        dec_in = torch.cat([z_t, h_placeholder], dim=-1)  # (B, z_dim + h_dim)
+        x_t = cell.dec_net(dec_in)  # (B, x_dim)
+        decoded_steps.append(x_t)
+    pred_seq = torch.stack(decoded_steps, dim=1)  # (B, steps, x_dim)
+    return pred_seq
 
-            for (z_t, x_t, h_t, logp_t) in expansions:
-                new_zs = partial_z + [z_t]      # accumulate latents
-                new_xs = partial_x + [x_t]      # accumulate embeddings
-                new_logp = logp_so_far + logp_t # shape (B,)
-                next_queue.append((new_zs, new_xs, h_t, new_logp))
-
-        queue = next_queue
-
-    # Now queue has top_k^steps expansions
-    all_paths = []
-    while queue:
-        partial_z, partial_x, h_final, total_logp = queue.pop()
-        # partial_z: list of length 'steps', each (B, z_dim)
-        # partial_x: list of length 'steps', each (B, x_dim)
-        # stack them so each path is (B, steps, z_dim) or (B, steps, x_dim)
-        z_cat = torch.stack(partial_z, dim=1)  # (B, steps, z_dim)
-        x_cat = torch.stack(partial_x, dim=1)  # (B, steps, x_dim)
-        all_paths.append((z_cat, x_cat, total_logp))
-
-    return all_paths  # length = top_k^steps
-
-def collapse_and_unembed(all_paths, cell):
-    """
-    1) Stack all latent sequences => shape (num_paths, B, steps, z_dim)
-    2) Average over num_paths => (B, steps, z_dim)
-    3) "Unembed" => decode that average Z into X (B, steps, x_dim)
-       We'll use a simpler decode: f(z) -> x
-       ignoring h_{t-1} for demonstration, or we can approximate h_{t-1}=0
-
-    all_paths: list of (z_cat, x_cat, total_logp)
-       where z_cat is (B, steps, z_dim)
-    """
-    # 1) gather Z
-    z_list = [p[0] for p in all_paths]  # each p is (z_cat, x_cat, total_logp)
-    # shape => (num_paths, B, steps, z_dim)
-    z_stack = torch.stack(z_list, dim=0)
-
-    # 2) average over num_paths
-    z_avg = z_stack.mean(dim=0)  # => (B, steps, z_dim)
-
-    # 3) decode each z_avg[t]
-    # We'll define a small "decoder_zonly" ignoring h
-    # or we can do partial reuse of cell.dec_net:
-    # but we must feed some placeholder for the missing h part.
-    B, steps, z_dim = z_avg.shape
-    x_dim = cell.x_dim
-
-    # If we want a separate net, define here:
-    # But let's do a hack: feed h=0 into cell.dec_net:
-    device = z_avg.device
-    h_zeros = torch.zeros(B, cell.h_dim, device=device)
-
-    # We'll decode each time step separately
-    x_decoded = []
-    for t in range(steps):
-        z_t = z_avg[:, t, :]  # (B, z_dim)
-        # cat with h=0
-        dec_in = torch.cat([z_t, h_zeros], dim=1)  # => (B, z_dim + h_dim)
-        x_t = cell.dec_net(dec_in)                # => (B, x_dim)
-        x_decoded.append(x_t)
-
-    x_decoded = torch.stack(x_decoded, dim=1)  # (B, steps, x_dim)
-    return z_avg, x_decoded
-
-def hallucinate_z_paths_and_decode(cell, h_init, top_k=5, steps=5):
-    """
-    1) BFS expansions collecting (z_1..z_steps) for each path
-    2) Average z across all paths
-    3) Decode z_avg to x_avg
-    Returns:
-      z_avg: (B, steps, z_dim)
-      x_avg: (B, steps, x_dim)
-    """
-    # BFS expansions
-    all_paths = vrnn_bfs_z(cell, h_init, top_k=top_k, steps=steps)
-    # all_paths => list of length top_k^steps
-    # each item => (z_cat, x_cat, total_logp)
-    # z_cat => (B, steps, z_dim)
-
-    # collapse & decode
-    z_avg, x_avg = collapse_and_unembed(all_paths, cell)
-    return z_avg, x_avg
 
 
 class CausalSelfAttention(nn.Module):
@@ -239,122 +182,14 @@ class CausalSelfAttention(nn.Module):
         self.flash = hasattr(F, 'scaled_dot_product_attention')
         self.use_rope = config.use_rope
         self.noise_alpha = config.noise_alpha
-        
-        # ---- Primary Q,K,V ----
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        # ---- Secondary Q,K,V if use_secondary_embed is enabled ----
-
-        # Output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        
-        # Dropouts
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
-        
-        if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                                        .view(1, 1, config.block_size, config.block_size))
-        self.vrnn_cell = VRNNCellPriorOnly(
-            x_dim=config.n_embd,   # same as model embedding size
-            h_dim=32,
-            z_dim=16
+        self.cond_vrnn = ComplexConditionalVRNNCell(
+            x_dim = 2 * config.n_embd,  # complex input dimension
+            h_dim = 64,
+            z_dim = 16
         )
-        # 2) A small linear map from (n_embd) -> (h_dim) to get h_init from x
-        self.map_x_to_h = nn.Linear(config.n_embd, 256, bias=False)
-        
-        # BFS hyperparams
         self.top_k = 5
         self.steps = 5
-        
-    def apply_rope(self, q, k):
-        """Applies RoPE to queries and keys."""
-        B, H, S, D = q.shape
-        rope_freqs = self.rope_freqs.to(q.device, q.dtype)
-        positions = torch.arange(S, device=q.device, dtype=q.dtype).unsqueeze(1)
-        theta = positions * rope_freqs.unsqueeze(0)  # shape [S, D/2]
-        sin_theta, cos_theta = theta.sin(), theta.cos()
 
-        sin_theta = sin_theta.expand(B, H, S, D // 2)
-        cos_theta = cos_theta.expand(B, H, S, D // 2)
-
-        q1, q2 = q[..., 0::2], q[..., 1::2]
-        k1, k2 = k[..., 0::2], k[..., 1::2]
-        q = torch.cat([q1*cos_theta - q2*sin_theta, q1*sin_theta + q2*cos_theta], dim=-1)
-        k = torch.cat([k1*cos_theta - k2*sin_theta, k1*sin_theta + k2*cos_theta], dim=-1)
-        return q, k
-
-    def forward(self, x, rope_freqs=None):
-        """
-        x:  (B, T, C) primary embeddings
-        x2: (B, T, C) secondary embeddings (if any)
-        """
-        B, T, C = x.size()
-        h_init = x.mean(dim=1)              # (B, C)
-        h_init = self.map_x_to_h(h_init)    # (B, h_dim)
-    
-        # --- 2) BFS expansions in VRNN (with gradient) ---
-        # Assume you have "hallucinate_z_paths_and_decode" available from your BFS code:
-        z_avg, x_vrnn = hallucinate_z_paths_and_decode(
-            self.vrnn_cell, h_init, top_k=self.top_k, steps=self.steps
-        )
-        # x_vrnn => (B, self.steps, x_dim)  where x_dim == C
-    
-        # --- 3) Concat the VRNN output to x => x_aug ---
-        x_aug = torch.cat([x, x_vrnn], dim=1)  # shape (B, T + self.steps, C)
-        T_aug = x_aug.size(1)    
-            
-        # ---- Primary pass Q,K,V ----
-        q, k, v = self.c_attn(x_aug).split(self.n_embd, dim=2)
-        q = q.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
-        k = k.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
-        v = v.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
-
-        noise = torch.randn_like(q) * self.noise_alpha
-        v_pos = v + noise
-        v_neg = v - noise
-
-        if self.use_rope and rope_freqs is not None:
-            self.rope_freqs = rope_freqs
-            q, k = self.apply_rope(q, k)
-
-        # Compute attention for the primary embedding
-        if self.flash:
-            att_pos = F.scaled_dot_product_attention(q, k, v_pos, attn_mask=None,
-                        dropout_p=self.dropout if self.training else 0, is_causal=True)
-            att_neg = F.scaled_dot_product_attention(q, k, v_neg, attn_mask=None,
-                        dropout_p=self.dropout if self.training else 0, is_causal=True)
-        else:
-            att_scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att_scores = att_scores.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-            att_probs = F.softmax(att_scores, dim=-1)
-            att_probs = self.attn_dropout(att_probs)
-            att_pos = att_probs @ v_pos
-            att_neg = att_probs @ v_neg
-        
-        y_primary = (att_pos + att_neg) / 2  # (B, n_head, T_aug, head_dim)
-
-        # Reshape
-        y = y_primary.transpose(1, 2).contiguous().view(B, T_aug, C)
-        y = y[:, :T, :]  # (B, T, C)
-
-        # Output projection
-        y = self.resid_dropout(self.c_proj(y))
-        return y
-
-
-
-class CausalSelfAttentionPair(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        assert config.n_embd % config.n_head == 0
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.dropout = config.dropout
-        self.flash = hasattr(F, 'scaled_dot_product_attention')
-        self.use_rope = config.use_rope
-        self.noise_alpha = config.noise_alpha
-        
         # ---- Primary Q,K,V ----
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # ---- Secondary Q,K,V if use_secondary_embed is enabled ----
@@ -395,13 +230,27 @@ class CausalSelfAttentionPair(nn.Module):
         x2: (B, T, C) secondary embeddings (if any)
         """
         B, T, C = x.size()
+        x_complex = torch.cat([x, x2], dim=-1)  # (B, T, 2C)
 
+        h = torch.zeros(B, self.cond_vrnn.h_dim, device=x.device)
+        for t in range(T):
+            x_t = x_complex[:, t, :]  # (B, 2C)
+            x_hat, h, z, kl = self.cond_vrnn(x_t, h)
+            
+        pred_complex = auto_regressive_predict(self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
+
+        pred_real, pred_imag = pred_complex.split(C, dim=-1)  # each: (B, steps, C)
+        
+        # 4. Append the predicted extensions to the original x and x2.
+        x_aug = torch.cat([x, pred_real], dim=1)   # (B, T+steps, C)
+        x2_aug = torch.cat([x2, pred_imag], dim=1)  # (B, T+steps, C)
+        T_aug = x_aug.size(1)
 
         # ---- Primary pass Q,K,V ----
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        q = q.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
+        k = k.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
 
         noise = torch.randn_like(q) * self.noise_alpha
         v_pos = v + noise
@@ -428,25 +277,24 @@ class CausalSelfAttentionPair(nn.Module):
         y_primary = (att_pos + att_neg) / 2  # (B, n_head, T, head_dim)
 
         # ---- Secondary pass if x2 is given ----
-        if (x2 is not None):
-            # c_attn_2 -> Q2,K2,V2
-            q2, k2, v2 = self.c_attn_2(x2).split(self.n_embd, dim=2)
-            q2 = q2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-            k2 = k2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-            v2 = v2.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-            if self.use_rope:
-                q2, k3 = self.apply_rope(q2, k2)
+        # c_attn_2 -> Q2,K2,V2
+        q2, k2, v2 = self.c_attn_2(x2).split(self.n_embd, dim=2)
+        q2 = q2.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
+        k2 = k2.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
+        v2 = v2.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
+        if self.use_rope:
+            q2, k3 = self.apply_rope(q2, k2)
 
 
-            if self.flash:
-                att2 = F.scaled_dot_product_attention(q2, k2, v2, attn_mask=None,
-                           dropout_p=self.dropout if self.training else 0, is_causal=True)
-            else:
-                att_scores2 = (q2 @ k2.transpose(-2, -1)) * (1.0 / math.sqrt(k2.size(-1)))
-                att_scores2 = att_scores2.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-                att_probs2 = F.softmax(att_scores2, dim=-1)
-                att_probs2 = self.attn_dropout(att_probs2)
-                att2 = att_probs2 @ v2
+        if self.flash:
+            att2 = F.scaled_dot_product_attention(q2, k2, v2, attn_mask=None,
+                       dropout_p=self.dropout if self.training else 0, is_causal=True)
+        else:
+            att_scores2 = (q2 @ k2.transpose(-2, -1)) * (1.0 / math.sqrt(k2.size(-1)))
+            att_scores2 = att_scores2.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            att_probs2 = F.softmax(att_scores2, dim=-1)
+            att_probs2 = self.attn_dropout(att_probs2)
+            att2 = att_probs2 @ v2
             
             # Combine primary + secondary stream
             y_secondary = att2  # shape (B, n_head, T, head_dim)
@@ -456,7 +304,8 @@ class CausalSelfAttentionPair(nn.Module):
             y = y_primary
 
         # Reshape
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = y.transpose(1, 2).contiguous().view(B, T_aug, C)
+        y = y[:,:T,:]#truncate
         # Output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
