@@ -6,6 +6,72 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+
+
+def compute_phase_embedding(tok_emb):
+            """
+            Computes a secondary embedding for each token by accumulating phase shifts.
+            
+            For each token position i in x (of shape (B, T, C)):
+              - We have two positional embeddings:
+                   * A forward rope embedding for tokens j > i.
+                   * A backward rope embedding for tokens j < i.
+              - For each token j (j != i), we compute a positional indication:
+                   If j > i: use forward embedding (function of j - i)
+                   If j < i: use backward embedding (function of i - j)
+              - Multiply that positional indication (elementwise) by x[j] to get a phase shift contribution.
+              - Sum over all j to obtain a cumulative phase shift, φ[i].
+              - Form a complex number with:
+                   real part = x[i]
+                   imaginary part = φ[i]
+                and take the magnitude:
+                   x2[i] = sqrt( x[i]^2 + φ[i]^2 )
+            
+            Args:
+                tok_emb: Tensor of shape (B, T, C) representing token embeddings.
+                pos_emb: Tensor of shape (T,C) with positions (0, 1, ..., T-1).
+            
+            Returns:
+                x2: Tensor of shape (B, T, C), the secondary embeddings.
+            """
+            B, T, C = tok_emb.shape
+            device = tok_emb.device
+        
+            # Define fixed frequencies per dimension (like standard RoPE frequencies).
+            dims = torch.arange(C, device=device, dtype=torch.float32)  # (C,)
+            freqs = 1.0 / (10000 ** (dims / C))  # (C,)
+        
+            # Compute a matrix of relative offsets: offset[i, j] = j - i.
+            indices = torch.arange(T, device=device)
+            offset_matrix = indices.unsqueeze(0) - indices.unsqueeze(1)  # shape (T, T)
+        
+            # Create masks for forward and backward directions.
+            forward_mask = (offset_matrix > 0).float()  # (T, T)
+            backward_mask = (offset_matrix < 0).float()  # (T, T)
+        
+            # For each pair (i, j) compute the absolute offset:
+            # For forward, we care about (j - i) and for backward, (i - j).
+            forward_offsets = torch.clamp(offset_matrix, min=0)  # (T, T): zeros for j <= i.
+            backward_offsets = torch.clamp(-offset_matrix, min=0)  # (T, T): zeros for j >= i.
+        
+            # Compute forward and backward positional rope embeddings.
+            # Here we use a simple sinusoidal function.
+            # Each will have shape (T, T, C): for each i and j, a vector of length C.
+            forward_pos_emb = torch.sin(forward_offsets.unsqueeze(-1) * freqs.view(1, 1, C))
+            backward_pos_emb = torch.sin(backward_offsets.unsqueeze(-1) * freqs.view(1, 1, C))
+            
+            # Combine them: for each pair (i,j), use the forward embedding if j>i, backward if j<i.
+            phase_emb = forward_mask.unsqueeze(-1) * forward_pos_emb + backward_mask.unsqueeze(-1) * backward_pos_emb
+            # For j == i, offset is 0 so sin(0)=0; effectively these contribute nothing.
+        
+            # Now, for each token position i (for each batch element), accumulate contributions from all j:
+            # φ[i, c] = sum_{j != i} [ phase_emb[i,j,c] * x[b,j,c] ]
+            # Using einsum: treat phase_emb as (T, T, C) and x as (B, T, C) so that we sum over j.
+            phi = torch.einsum('ijc,bjc->bic', phase_emb, tok_emb)
+            phi = phi / (T ** 0.5)
+            return phi
+
+
 class LayerNorm(nn.Module):
     """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
 
@@ -224,12 +290,13 @@ class CausalSelfAttention(nn.Module):
         k = torch.cat([k1*cos_theta - k2*sin_theta, k1*sin_theta + k2*cos_theta], dim=-1)
         return q, k
 
-    def forward(self, x, x2=None, rope_freqs=None):
+    def forward(self, x, rope_freqs=None):
         """
         x:  (B, T, C) primary embeddings
         x2: (B, T, C) secondary embeddings (if any)
         """
         B, T, C = x.size()
+        x2 = compute_phase_embedding(x)
         x_complex = torch.cat([x, x2], dim=-1)  # (B, T, 2C)
 
         h = torch.zeros(B, self.cond_vrnn.h_dim, device=x.device)
@@ -336,31 +403,15 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
-        self.mlp = MLP(config)
-    
-    def forward(self, x, rope_freqs):
-        x = x + self.attn(self.ln_1(x), rope_freqs)
-        x = x + self.mlp(self.ln_2(x))       
-        return x
-
-
-class ResBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.ln_r = LayerNorm(config.n_embd, bias=config.bias)
-
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttentionPair(config)
+        self.attn = CausalSelfAttention(config)
         self.mlp = MLP(config)
     
-    def forward(self, x,x2, rope_freqs, num_iterations=3):
+    def forward(self, x, rope_freqs, num_iterations=3):
         """
         Iteratively apply attention and MLP with residuals over multiple steps.
         """
@@ -369,13 +420,11 @@ class ResBlock(nn.Module):
 
             # Apply normalization and attention (using the residual)
             x = self.ln_1(x)
-            x2 = self.ln_r(x2)
-            x = self.attn(x,x2, rope_freqs)
+            x = self.attn(x, rope_freqs)
 
             # Apply normalization and MLP (using the residual)
             x = self.ln_2(x)
             x = self.mlp(x)
-
             # Add the residual after each iteration to refine the result
             x = x + residual
 
@@ -409,10 +458,7 @@ class GPT(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            prelude = nn.ModuleList([Block(config) for _ in range(1)]),
-            preludey = nn.ModuleList([Block(config) for _ in range(1)]),
-            coda = nn.ModuleList([Block(config) for _ in range(1)]),
-            residual = nn.ModuleList([ResBlock(config) for _ in range(config.n_layer)]),
+            residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -460,72 +506,6 @@ class GPT(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
-
-    def compute_phase_embedding(self, tok_emb, pos_emb):
-            """
-            Computes a secondary embedding for each token by accumulating phase shifts.
-            
-            For each token position i in x (of shape (B, T, C)):
-              - We have two positional embeddings:
-                   * A forward rope embedding for tokens j > i.
-                   * A backward rope embedding for tokens j < i.
-              - For each token j (j != i), we compute a positional indication:
-                   If j > i: use forward embedding (function of j - i)
-                   If j < i: use backward embedding (function of i - j)
-              - Multiply that positional indication (elementwise) by x[j] to get a phase shift contribution.
-              - Sum over all j to obtain a cumulative phase shift, φ[i].
-              - Form a complex number with:
-                   real part = x[i]
-                   imaginary part = φ[i]
-                and take the magnitude:
-                   x2[i] = sqrt( x[i]^2 + φ[i]^2 )
-            
-            Args:
-                tok_emb: Tensor of shape (B, T, C) representing token embeddings.
-                pos_emb: Tensor of shape (T,C) with positions (0, 1, ..., T-1).
-            
-            Returns:
-                x2: Tensor of shape (B, T, C), the secondary embeddings.
-            """
-            B, T, C = tok_emb.shape
-            device = tok_emb.device
-        
-            # Define fixed frequencies per dimension (like standard RoPE frequencies).
-            dims = torch.arange(C, device=device, dtype=torch.float32)  # (C,)
-            freqs = 1.0 / (10000 ** (dims / C))  # (C,)
-        
-            # Compute a matrix of relative offsets: offset[i, j] = j - i.
-            indices = torch.arange(T, device=device)
-            offset_matrix = indices.unsqueeze(0) - indices.unsqueeze(1)  # shape (T, T)
-        
-            # Create masks for forward and backward directions.
-            forward_mask = (offset_matrix > 0).float()  # (T, T)
-            backward_mask = (offset_matrix < 0).float()  # (T, T)
-        
-            # For each pair (i, j) compute the absolute offset:
-            # For forward, we care about (j - i) and for backward, (i - j).
-            forward_offsets = torch.clamp(offset_matrix, min=0)  # (T, T): zeros for j <= i.
-            backward_offsets = torch.clamp(-offset_matrix, min=0)  # (T, T): zeros for j >= i.
-        
-            # Compute forward and backward positional rope embeddings.
-            # Here we use a simple sinusoidal function.
-            # Each will have shape (T, T, C): for each i and j, a vector of length C.
-            forward_pos_emb = torch.sin(forward_offsets.unsqueeze(-1) * freqs.view(1, 1, C))
-            backward_pos_emb = torch.sin(backward_offsets.unsqueeze(-1) * freqs.view(1, 1, C))
-            
-            # Combine them: for each pair (i,j), use the forward embedding if j>i, backward if j<i.
-            phase_emb = forward_mask.unsqueeze(-1) * forward_pos_emb + backward_mask.unsqueeze(-1) * backward_pos_emb
-            # For j == i, offset is 0 so sin(0)=0; effectively these contribute nothing.
-        
-            # Now, for each token position i (for each batch element), accumulate contributions from all j:
-            # φ[i, c] = sum_{j != i} [ phase_emb[i,j,c] * x[b,j,c] ]
-            # Using einsum: treat phase_emb as (T, T, C) and x as (B, T, C) so that we sum over j.
-            phi = torch.einsum('ijc,bjc->bic', phase_emb, tok_emb)
-            phi = phi / (T ** 0.5)
-            return phi
-
-
 
 
     def forward(
@@ -581,11 +561,7 @@ class GPT(nn.Module):
                 )
             return logits, loss
 
-    # ------------------------------------------------------------------
-    # Internal helper that runs the transformer stacks on a given 
-    # index sequence. Optionally override the last token's embedding.
-    # Also includes "secondary embeddings" if config.use_secondary_embed.
-    # ------------------------------------------------------------------
+
     def _run_transformer(self, idx):
         """
         1) Convert idx -> embeddings
@@ -600,32 +576,14 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
         pos = torch.arange(t, dtype=torch.long, device=device)
         pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
-        phase = self.compute_phase_embedding(tok_emb, pos_emb) 
-
         x = tok_emb + pos_emb.unsqueeze(0) 
-        y = tok_emb + phase
 
-        
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
-        
-        # Step 2: Apply dropout mask to token embeddings (x) and later to phase embeddings
         x = x * dropout_mask  
-        y = y * dropout_mask              
-
-        for i, block in enumerate(self.transformer.prelude):
-            residual = block(x, rope_freqs=self.rope_freqs)  
-       
-        for i, block in enumerate(self.transformer.preludey):
-            residualy = block(y, rope_freqs=self.rope_freqs)  
 
         # Pass through each block
         for i, block in enumerate(self.transformer.residual):
-            x = block(x+residual, residualy, rope_freqs=self.rope_freqs)
-            residualy = residualy + self.ln_R(x)
-
-                    
-        for i, block in enumerate(self.transformer.coda):
-            x = block(x, rope_freqs=self.rope_freqs)       
+            x = block(x, rope_freqs=self.rope_freqs)   
 
         # Final layernorm
         x = self.transformer.ln_f(x)
