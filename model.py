@@ -229,8 +229,12 @@ def auto_regressive_predict(cell, h_init, steps, top_k=5, n_candidates=20):
             # Sort using PyTorch's built-in sorting, which keeps computation inside the graph
             _, top_indices = torch.sort(cumulative_logps, descending=True)
             
-            # Select top_k branches using tensor indexing
-            next_branches = [next_branches[i] for i in top_indices[:top_k]]
+            # Convert top_indices to a Python list before using it for list indexing
+            top_indices = top_indices[:top_k].tolist()
+            
+            # Select top_k branches using Python list indexing
+            next_branches = [next_branches[i] for i in top_indices]
+
             queue = deque(next_branches)
     
     # After all steps, each branch has a list of latent z's of length 'steps'.
