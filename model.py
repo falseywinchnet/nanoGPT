@@ -264,9 +264,6 @@ def ingest_sequence(cell, x_complex):
     return x_hat_seq, h
 
 
-
-
-
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -343,7 +340,7 @@ class CausalSelfAttention(nn.Module):
         T_aug = x_aug.size(1)
 
         # ---- Primary pass Q,K,V ----
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        q, k, v = self.c_attn(x_aug).split(self.n_embd, dim=2)
         q = q.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
         k = k.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
@@ -374,7 +371,7 @@ class CausalSelfAttention(nn.Module):
 
         # ---- Secondary pass if x2 is given ----
         # c_attn_2 -> Q2,K2,V2
-        q2, k2, v2 = self.c_attn_2(x2).split(self.n_embd, dim=2)
+        q2, k2, v2 = self.c_attn_2(x2_aug).split(self.n_embd, dim=2)
         q2 = q2.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
         k2 = k2.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
         v2 = v2.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
