@@ -115,7 +115,7 @@ class ComplexConditionalVRNNCell(nn.Module):
         )
         # RNN update: updates hidden state from [x_t, z_t]
         self.rnn = nn.GRUCell(x_dim + z_dim, h_dim)
-        self.activation = ReferenceActivation()
+        self.activation = nn.GELU()
 
     def forward(self, x, h_prev):
         """
