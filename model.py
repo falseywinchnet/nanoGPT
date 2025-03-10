@@ -349,9 +349,9 @@ class CausalSelfAttention(nn.Module):
         q2 = q2.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
         k2 = k2.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
         v2 = v2.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
+                
         if self.use_rope:
-            q2, k3 = self.apply_rope(q2, k2)
-
+            q2, k2 = self.apply_rope(q2, k2)
 
         if self.flash:
             att2 = F.scaled_dot_product_attention(q2, k2, v2, attn_mask=None,
@@ -364,11 +364,8 @@ class CausalSelfAttention(nn.Module):
             att2 = att_probs2 @ v2
             
             # Combine primary + secondary stream
-            y_secondary = att2  # shape (B, n_head, T, head_dim)
-            y = (y_primary + y_secondary) / 2
-        else:
-            # No x2 => just use primary
-            y = y_primary
+        y_secondary = att2  # shape (B, n_head, T, head_dim)
+        y = (y_primary + y_secondary) / 2
 
         # Reshape
         y = y.transpose(1, 2).contiguous().view(B, T_aug, C)
