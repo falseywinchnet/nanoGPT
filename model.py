@@ -659,11 +659,11 @@ class GPT(nn.Module):
         
         if torch.is_grad_enabled():
            h = None #reset anew
-           x_hat, h, z = self.cond_vrnn(x[:, max(0,t-5):, :], h)  # Pass batch through VRNN
+           x_hat, h, z = self.cond_vrnn(x[:, max(0,t-25):, :], h)  # Pass batch through VRNN
 
         else:
             h = [h.to(x.device) for h in self.h_safe]  # Ensure h_safe is on the same device as x 
-            x_hat, h, z = self.cond_vrnn(x[:, max(0,t-5):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
+            x_hat, h, z = self.cond_vrnn(x[:, max(0,t-25):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
 
             
         with torch.no_grad():
@@ -682,10 +682,10 @@ class GPT(nn.Module):
 
         # Final layernorm
         x = self.transformer.ln_f(x)
-        z_prime = x[:, t, :]  # for example
+        z_prime = x[:, max(0,t-25):, :]  # for example
         lambda_mse = 0.5
         lambda_cos = 0.5 #heca8se we want patterns
-        vrnn_loss = lambda_mse * F.mse_loss(z, z_prime) + lambda_cos * (1 - F.cosine_similarity(z, z_prime, dim=-1).mean())
+        vrnn_loss = lambda_mse * F.mse_loss(x_hat, z_prime) + lambda_cos * (1 - F.cosine_similarity(x_hat, z_prime, dim=-1).mean())
                 
         return x[:,:t,:],vrnn_loss
     
