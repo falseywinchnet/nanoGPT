@@ -384,7 +384,7 @@ class CausalSelfAttention(nn.Module):
             
             # Combine primary + secondary stream
         y_secondary = att2  # shape (B, n_head, T, head_dim)
-        y = (y_primary + y_secondary) / 2
+        y = (y_primary*0.9 + y_secondary*0.1) / 2
 
         # Reshape
         y = y.transpose(1, 2).contiguous().view(B, T_aug, C)
