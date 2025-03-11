@@ -578,7 +578,7 @@ class GPT(nn.Module):
                     ignore_index=-1
                 )
                 lambda_vrnn = 0.1  # Hyperparameter to weigh the VRNN loss.
-                loss = loss + lambda_vrnn * vrnn_loss_total
+                loss = loss + lambda_vrnn * v_loss
             return logits, loss
 
 
