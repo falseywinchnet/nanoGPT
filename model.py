@@ -176,8 +176,8 @@ class CustomVRNN(nn.Module):
         batch_size, seq_len, _ = x.shape
 
         # Initialize hidden states if not provided
-        if h_prev is None:
-            h_prev = [torch.zeros(batch_size, self.h_dim, device=x.device) for _ in range(self.num_layers)]
+        if h_prev is None or h_prev[0].size(0) != batch_size:
+                h_prev = [torch.zeros(batch_size, self.h_dim, device=x.device) for _ in range(self.num_layers)]
 
         x_hat_seq, new_h_states, z_seq = [], [], []
 
