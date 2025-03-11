@@ -276,9 +276,7 @@ class CausalSelfAttention(nn.Module):
 
         # ---- Primary Q,K,V ----
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        # ---- Secondary Q,K,V if use_secondary_embed is enabled ----
-        self.c_attn_2 = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        
+    
         # Output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         
