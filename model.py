@@ -256,38 +256,6 @@ def auto_regressive_predict(cell, h_init, steps, top_k=5, n_candidates=20):
     pred_seq = torch.stack(decoded_steps, dim=1)  # (B, steps, cell.x_dim)
     return pred_seq
             
-# ---------------------------------------------------------------------------
-# Ingestion phase: process the observed sequence with the conditional VRNN.
-def ingest_sequence(cell, x_complex):
-    """
-    x_complex: (B, T, x_dim) — the input sequence (complex)
-    Returns:
-       x_hat_seq: (B, T, x_dim) — sequence of decoded predictions (for reconstruction)
-       h_final: (B, h_dim) — final hidden state after ingestion
-    """
-    B, T, x_dim = x_complex.shape
-    h = torch.zeros(B, cell.h_dim, device=x_complex.device)
-    x_hat_list = []
-    
-    for t in range(T):
-        # Slice the last 5 timesteps (or fewer if at the beginning)
-        start_idx = max(0, t - 4)
-        x_window = x_complex[:, start_idx:t+1, :]  # (B, window_size, x_dim)
-
-        # If fewer than 5, pad with zeros
-        pad_size = 5 - x_window.size(1)
-        if pad_size > 0:
-            pad = torch.zeros(B, pad_size, x_dim, device=x_complex.device)
-            x_window = torch.cat([pad, x_window], dim=1)  # (B, 5, x_dim)
-
-        # Flatten across time dimension before passing to VRNN
-        x_window_flat = x_window.view(B, -1)  # (B, 5 * x_dim)
-        
-        x_hat, h, z = cell(x_window_flat, h)  # VRNN now sees a local window
-        x_hat_list.append(x_hat)
-
-    x_hat_seq = torch.stack(x_hat_list, dim=1)
-    return x_hat_seq, h,z
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -350,7 +318,9 @@ class CausalSelfAttention(nn.Module):
         x2 = compute_phase_embedding(x)
         x_complex = torch.cat([x, x2], dim=-1)  # (B, T, 2C)
 
-        x_hat_seq, h,z = ingest_sequence(self.cond_vrnn,x_complex) 
+        for t in range(max(0,T-5),T): #only consider last five steps
+            x_t = x_complex[:, t, :]  # (B, 2C)
+            x_hat, h, z = self.cond_vrnn(x_t, h)
         with torch.no_grad():
             pred_complex = auto_regressive_predict(self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
             #dont backprop this because its a ucking hyrdra
