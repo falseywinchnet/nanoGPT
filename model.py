@@ -481,7 +481,7 @@ class Block(nn.Module):
             """
             Iteratively apply attention and MLP with residuals over multiple steps.
             """
-                        x = self.ln_1(x)
+            x = self.ln_1(x)
             x = self.attn(x, rope_freqs)
             
             # Apply normalization and MLP (using the residual)
