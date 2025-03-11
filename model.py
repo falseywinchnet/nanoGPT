@@ -513,7 +513,7 @@ class Block(nn.Module):
             z_prime = x[:, -1, :]  # for example
             lambda_mse = 0.5
             lambda_cos = 0.5 #heca8se we want patterns
-            vrnn_loss = lambda_mse * F.mse_loss(z_pred, z_target) + lambda_cos * (1 - F.cosine_similarity(z_pred, z_target, dim=-1).mean())
+            vrnn_loss = lambda_mse * F.mse_loss(z, z_prime) + lambda_cos * (1 - F.cosine_similarity(z, z_prime, dim=-1).mean())
             x = x + residual
 
             
