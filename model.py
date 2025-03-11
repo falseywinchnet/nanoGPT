@@ -656,13 +656,11 @@ class GPT(nn.Module):
         x = tok_emb 
         if torch.is_grad_enabled():
            h = None #reset anew
-           x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :], h)  # Pass batch through VRNN
+           x_hat, h, z = self.cond_vrnn(x[:, max(0,t-5):, :], h)  # Pass batch through VRNN
 
         else:
-            h = [h.to(x.device) for h in self.h_safe]  # Ensure h_safe is on the same device as x
-         
-                    
-            x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
+            h = [h.to(x.device) for h in self.h_safe]  # Ensure h_safe is on the same device as x 
+            x_hat, h, z = self.cond_vrnn(x[:, max(0,t-5):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
 
             
         with torch.no_grad():
@@ -670,7 +668,7 @@ class GPT(nn.Module):
             pred= auto_regressive_predict(x[:, -1, :],self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
             #dont backprop this because its a ucking hyrdra
 
-        x_aug = torch.cat([x, pred], dim=1)   # (B, T+steps, C)
+        x = torch.cat([x, pred], dim=1)   # (B, T+steps, C)
         T_aug = x_aug.size(1)
                 
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
@@ -686,7 +684,7 @@ class GPT(nn.Module):
 
         # Final layernorm
         x = self.transformer.ln_f(x)
-        return x,total_vrnn_loss
+        return x[:,:t,:],total_vrnn_loss
     
         
     def crop_block_size(self, block_size):
