@@ -511,7 +511,9 @@ class Block(nn.Module):
             x = self.ln_2(x)
             x = self.mlp(x)
             z_prime = x[:, -1, :]  # for example
-            vrnn_loss = F.mse_loss(z, z_prime)
+            lambda_mse = 0.5
+            lambda_cos = 0.5 #heca8se we want patterns
+            vrnn_loss = lambda_mse * F.mse_loss(z_pred, z_target) + lambda_cos * (1 - F.cosine_similarity(z_pred, z_target, dim=-1).mean())
             x = x + residual
 
             
