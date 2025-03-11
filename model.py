@@ -97,7 +97,7 @@ class ComplexConditionalVRNNCell(nn.Module):
 
         # Inference network: q(z_t | x_t, h_{t-1})
         self.enc_net = nn.Sequential(
-            nn.Linear(x_dim + h_dim, 2 * z_dim),
+            nn.Linear(x_dim + h_dim, 2*  z_dim),
             nn.Tanh(),
             nn.Linear(2 * z_dim, 2 * z_dim)
         )
@@ -267,7 +267,7 @@ class CausalSelfAttention(nn.Module):
         self.use_rope = config.use_rope
         self.noise_alpha = config.noise_alpha
         self.cond_vrnn = ComplexConditionalVRNNCell(
-            x_dim = 2 * config.n_embd,  # complex input dimension
+            x_dim = config.n_embd,  # complex input dimension
             h_dim = 4,
             z_dim = 256
         )
@@ -315,21 +315,19 @@ class CausalSelfAttention(nn.Module):
         """
         B, T, C = x.size()
         x2 = compute_phase_embedding(x)
-        x_complex = torch.cat([x, x2], dim=-1)  # (B, T, 2C)
+        x = x + x2/T
         h = torch.zeros(B, self.cond_vrnn.h_dim, device=x.device)
 
         for t in range(max(0,T-5),T): #only consider last five steps
-            x_t = x_complex[:, t, :]  # (B, 2C)
+            x_t = x[:, t, :]  # (B, 2C)
             x_hat, h, z = self.cond_vrnn(x_t, h)
         with torch.no_grad():
-            pred_complex = auto_regressive_predict(self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
+            pred= auto_regressive_predict(self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
             #dont backprop this because its a ucking hyrdra
 
-        pred_real, pred_imag = pred_complex.split(C, dim=-1)  # each: (B, steps, C)
         
         # 4. Append the predicted extensions to the original x and x2.
-        x_aug = torch.cat([x, pred_real], dim=1)   # (B, T+steps, C)
-        x2_aug = torch.cat([x2, pred_imag], dim=1)  # (B, T+steps, C)
+        x_aug = torch.cat([x, pred], dim=1)   # (B, T+steps, C)
         T_aug = x_aug.size(1)
 
         # ---- Primary pass Q,K,V ----
@@ -360,32 +358,9 @@ class CausalSelfAttention(nn.Module):
             att_pos = att_probs @ v_pos
             att_neg = att_probs @ v_neg
         
-        y_primary = (att_pos + att_neg) / 2  # (B, n_head, T, head_dim)
+        y = (att_pos + att_neg) / 2  # (B, n_head, T, head_dim)
 
-        # ---- Secondary pass if x2 is given ----
-        # c_attn_2 -> Q2,K2,V2
-        q2, k2, v2 = self.c_attn_2(x2_aug).split(self.n_embd, dim=2)
-        q2 = q2.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
-        k2 = k2.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
-        v2 = v2.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
-                
-        if self.use_rope:
-            q2, k2 = self.apply_rope(q2, k2)
-
-        if self.flash:
-            att2 = F.scaled_dot_product_attention(q2, k2, v2, attn_mask=None,
-                       dropout_p=self.dropout if self.training else 0, is_causal=True)
-        else:
-            att_scores2 = (q2 @ k2.transpose(-2, -1)) * (1.0 / math.sqrt(k2.size(-1)))
-            att_scores2 = att_scores2.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-            att_probs2 = F.softmax(att_scores2, dim=-1)
-            att_probs2 = self.attn_dropout(att_probs2)
-            att2 = att_probs2 @ v2
-            
-            # Combine primary + secondary stream
-        y_secondary = att2  # shape (B, n_head, T, head_dim)
-        y = (y_primary*0.9 + y_secondary*0.1) / 2
-
+        
         # Reshape
         y = y.transpose(1, 2).contiguous().view(B, T_aug, C)
         y = y[:,:T,:]#truncate
