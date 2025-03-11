@@ -339,7 +339,7 @@ def auto_regressive_predict(last_x, vrnn, h_init, steps, top_k=5, n_candidates=2
     for t in range(steps):
         z_t = avg_latent_seq[:, t, :]  # (B, z_dim)
         dec_in = torch.cat([z_t, h_placeholder], dim=-1)  # (B, z_dim + h_dim)
-        x_t = vrnn.dec_net(dec_in)  # (B, x_dim)
+        x_t = vrnn.vrnn_cells[0].dec_net(dec_in)
         decoded_steps.append(x_t)
     pred_seq = torch.stack(decoded_steps, dim=1)  # (B, steps, x_dim)
     return pred_seq
