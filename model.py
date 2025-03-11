@@ -682,13 +682,14 @@ class GPT(nn.Module):
 
         # Final layernorm
         x = self.transformer.ln_f(x)
+        x = x[:,:t,:]
         z_prime = x[:, max(0,t-25):, :]  # for example
         print("zprime", z_prime.shape)
         lambda_mse = 0.5
         lambda_cos = 0.5 #heca8se we want patterns
         vrnn_loss = lambda_mse * F.mse_loss(x_hat, z_prime) + lambda_cos * (1 - F.cosine_similarity(x_hat, z_prime, dim=-1).mean())
                 
-        return x[:,:t,:],vrnn_loss
+        return x,vrnn_loss
     
         
     def crop_block_size(self, block_size):
