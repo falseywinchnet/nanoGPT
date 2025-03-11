@@ -99,13 +99,27 @@ class CustomVRNNCell(nn.Module):
         self.z_dim = z_dim
 
         # Encoder: Produces latent representation z from input and previous state
-        self.enc_net = nn.Linear(x_dim + h_dim, z_dim)
+        # Inference network: q(z_t | x_t, h_{t-1})
+        self.enc_net = nn.Sequential(
+            nn.Linear(x_dim + h_dim, 2 * z_dim),
+            nn.Tanh(),
+            nn.Linear(2 * z_dim, 2 * z_dim)
+        )
         
         # Decoder: Reconstructs input x from latent z and hidden state
-        self.dec_net = nn.Linear(z_dim + h_dim, x_dim)
+        self.dec_net = nn.Sequential(
+            nn.Linear(z_dim + h_dim, 2 * x_dim),
+            nn.Tanh(),
+            nn.Linear(2 * x_dim, x_dim)
+        )
 
+        self.prior_net = nn.Sequential(
+            nn.Linear(h_dim, 2 * z_dim),
+            nn.Tanh(),
+            nn.Linear(2 * z_dim, 2 * z_dim)
+        )
         # Custom state transition (instead of GRU)
-        self.trans_net = nn.Linear(x_dim + z_dim, h_dim)
+        self.trans_net = nn.GRUCell(x_dim + z_dim, h_dim)
 
         # Activation function
         self.activation = nn.GELU()
@@ -124,6 +138,12 @@ class CustomVRNNCell(nn.Module):
         # Encode input and previous state into latent z
         enc_input = torch.cat([x, h_prev], dim=-1)
         z = self.enc_net(enc_input)
+
+        # Prior from h_prev
+        prior_out = self.prior_net(h_prev)
+        mu_prior, log_sigma_prior = prior_out.chunk(2, dim=-1)
+        sigma_prior = torch.exp(log_sigma_prior)
+
 
         # Decode latent z and hidden state to reconstruct x_hat
         dec_input = torch.cat([z, h_prev], dim=-1)
