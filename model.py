@@ -519,6 +519,7 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
+            wph = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
@@ -646,12 +647,19 @@ class GPT(nn.Module):
         """
         b, t = idx.shape
         device = idx.device
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
+        phase = compute_phase_embedding(tok_emb)
+
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)        
-        if torch.is_grad_enabled():
+        phase_emb = = self.transformer.wph(phase) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb + phase_emb
+
+                
+                
+                if torch.is_grad_enabled():
            h = None #reset anew
            x_hat, h, z = self.cond_vrnn(x[:, max(0,t-5):, :], h)  # Pass batch through VRNN
 
