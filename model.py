@@ -655,7 +655,7 @@ class GPT(nn.Module):
 
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         phase_emb = self.transformer.wph(phase) # position embeddings of shape (t, n_embd)
-        x = tok_emb + pos_emb + phase_emb
+        x = tok_emb + pos_emb #+ phase_emb
         
         if torch.is_grad_enabled():
            h = None #reset anew
