@@ -1,3 +1,7 @@
+#copyright joshuah.rainstar@gmail.com 2025
+#may not be used without some form of compensation
+#PLEASE SEND ME MONEY
+
 import math
 import inspect
 from dataclasses import dataclass
