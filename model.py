@@ -485,7 +485,7 @@ class Block(nn.Module):
             
             # Apply normalization and attention (using the residual)
             x = self.ln_1(x)
-            x ,z = self.attn(x, rope_freqs)
+            x = self.attn(x, rope_freqs)
             
             # Apply normalization and MLP (using the residual)
             x = self.ln_2(x)
