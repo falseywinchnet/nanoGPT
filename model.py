@@ -318,7 +318,7 @@ class CausalSelfAttention(nn.Module):
     
         # Output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.h_safe= torch.zeros(B, self.cond_vrnn.h_dim, device=x.device)
+        self.h_safe= torch.zeros(1, self.cond_vrnn.h_dim, device=x.device)
 
         # Dropouts
         self.attn_dropout = nn.Dropout(config.dropout)
@@ -356,11 +356,11 @@ class CausalSelfAttention(nn.Module):
         #x = x + x2/T
         if torch.training:
            h = torch.zeros(B, self.cond_vrnn.h_dim, device=x.device)
-           x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :] .unsqueeze(1), h)  # Pass batch through VRNN
+           x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :], h)  # Pass batch through VRNN
 
         else:
             h = self.h_safe
-            x_hat, h, z = self.cond_vrnn(x[:, -1, :] , h)  # Pass last item so far through VRNN
+            x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
 
             
         with torch.no_grad():
