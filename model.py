@@ -519,7 +519,7 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
-            wph = nn.Embedding(config.block_size, config.n_embd),
+            wph = nn.Linear(config.n_embed, config.n_embd),
             drop = nn.Dropout(config.dropout),
             residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
