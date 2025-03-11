@@ -268,6 +268,8 @@ def auto_regressive_predict(last_x, vrnn, h_init, steps, top_k=5, n_candidates=2
         # --- First cell: override latent ---
         # Instead of computing z = enc_net(concat(last_x, h_list[0])),
         # we use z_candidate.
+        print("z_candidate.shape:", z_candidate.shape)  # Expect (B,384)
+        print("h_list[0].shape:", h_list[0].shape)         # Expect (B,8)
         dec_in = torch.cat([z_candidate, h_list[0]], dim=-1)  # (B, z_dim + h_dim)
         x_hat0 = vrnn.vrnn_cells[0].dec_net(dec_in)           # (B, x_dim)
         trans_in = torch.cat([last_x, z_candidate], dim=-1)     # (B, x_dim + z_dim)
