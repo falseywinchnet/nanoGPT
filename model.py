@@ -407,7 +407,7 @@ class CausalSelfAttention(nn.Module):
         
 
         # ---- Primary pass Q,K,V ----
-        q, k, v = self.c_attn(x_aug).split(self.n_embd, dim=2)
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
@@ -439,7 +439,6 @@ class CausalSelfAttention(nn.Module):
         
         # Reshape
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        y = y[:,:T,:]  #truncate
         # Output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
