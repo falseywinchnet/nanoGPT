@@ -221,7 +221,7 @@ def auto_regressive_predict(cell, h_init, steps, top_k=5, n_candidates=20):
     # Initialize a queue to hold branches.
     # Each branch is a tuple: (latent_seq, h, cumulative_logp, last_x)
     # last_x is the most recent predicted output (used as input for the next step)
-    last_x = torch.zeros(B, cell.x_dim, device=h_init.device)  # start with zeros
+    last_x = torch.zeros(1, cell.x_dim, device=h_init.device)  # start with zeros
     queue = deque()
     # Start with an empty latent sequence and initial hidden state.
     queue.append(([], h_init, torch.zeros(B, device=h_init.device), last_x))
@@ -303,7 +303,7 @@ class CausalSelfAttention(nn.Module):
         self.use_rope = config.use_rope
         self.noise_alpha = config.noise_alpha
         self.cond_vrnn = CustomVRNN(
-                seq_len=config.block_size,
+                seq_len=10,
                 x_dim=config.n_embd,
                 h_dim=8,
                 z_dim=config.n_embd,
@@ -360,7 +360,7 @@ class CausalSelfAttention(nn.Module):
 
         else:
             h = self.h_safe
-            x_hat, h, z = self.cond_vrnn(x[:, -1, :] .unsqueeze(1), h)  # Pass batch through VRNN
+            x_hat, h, z = self.cond_vrnn(x[:, -1, :] , h)  # Pass last item so far through VRNN
 
             
         with torch.no_grad():
