@@ -594,9 +594,7 @@ class GPT(nn.Module):
 
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
-        pos = torch.arange(t, dtype=torch.long, device=device)
-        pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
-        x = tok_emb + pos_emb.unsqueeze(0) 
+        x = tok_emb 
 
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
         x = x * dropout_mask  
