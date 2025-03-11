@@ -296,7 +296,7 @@ def auto_regressive_predict(last_x, vrnn, h_init, steps, top_k=5, n_candidates=2
             latent_seq, h_list, cum_logp, last_x = branches.popleft()
             
             # Compute prior distribution from the final layer's hidden state.
-            prior_out = vrnn.prior_net(h_list[-1])  # (B, 2*z_dim)
+            prior_out = vrnn.vrnn_cells[-1].prior_net(h_list[-1])
             mu, log_sigma = prior_out.chunk(2, dim=-1)
             sigma = torch.exp(log_sigma)
             
