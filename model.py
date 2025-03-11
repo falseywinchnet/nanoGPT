@@ -481,13 +481,14 @@ class Block(nn.Module):
             """
             Iteratively apply attention and MLP with residuals over multiple steps.
             """
+            residual = x
             x = self.ln_1(x)
             x = self.attn(x, rope_freqs)
             
             # Apply normalization and MLP (using the residual)
             x = self.ln_2(x)
             x = self.mlp(x)
-
+            x = x + residual
             
             return x
     
@@ -648,7 +649,8 @@ class GPT(nn.Module):
 
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
-        x = tok_emb 
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = self.transformer.drop(tok_emb + pos_emb)        
         if torch.is_grad_enabled():
            h = None #reset anew
            x_hat, h, z = self.cond_vrnn(x[:, max(0,t-5):, :], h)  # Pass batch through VRNN
