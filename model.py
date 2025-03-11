@@ -232,11 +232,9 @@ def auto_regressive_predict(cell, h_init, steps, top_k=5, n_candidates=20):
                 new_last_x = x_dec[:, i, :]     # (B, x_dim)
                 # Append this branch.
                 next_branches.append((new_latent_seq, h_new[:, i, :], new_cum_logp, new_last_x))
-
-            next_branches = debug_sort_branches(next_branches, top_k)
-
-
-            queue = deque(next_branches)
+        # Prune branches: sort by average cumulative logp (higher is better)
+        next_branches = sorted(next_branches, key=lambda tup: tup[2].mean().item(), reverse=True)[:top_k]
+        queue = deque(next_branches)
     
     # After all steps, each branch has a list of latent z's of length 'steps'.
     # Stack them: for each branch, latent_seq becomes (B, steps, z_dim).
@@ -255,6 +253,7 @@ def auto_regressive_predict(cell, h_init, steps, top_k=5, n_candidates=20):
         decoded_steps.append(x_t)
     pred_seq = torch.stack(decoded_steps, dim=1)  # (B, steps, cell.x_dim)
     return pred_seq
+            
             
 
 class CausalSelfAttention(nn.Module):
