@@ -269,7 +269,7 @@ class CausalSelfAttention(nn.Module):
         self.cond_vrnn = ComplexConditionalVRNNCell(
             x_dim = 2 * config.n_embd,  # complex input dimension
             h_dim = 4,
-            z_dim = 5
+            z_dim = 256
         )
         self.top_k = 5
         self.steps = 5
