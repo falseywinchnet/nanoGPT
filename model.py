@@ -227,125 +227,110 @@ class CustomVRNN(nn.Module):
 
 
 from collections import deque
+import torch
+import torch.nn.functional as F
 
-def auto_regressive_predict(last_x, vrnn, h_init, steps, top_k=5, n_candidates=20):
+def auto_regressive_predict_q(last_q, vrnn, h_init, steps, top_k=5, n_candidates=10, sigma=0.1):
     """
-    Auto-regressively predict future timesteps using beam search while preserving
-    the full multi-layer hidden state (a list of h's) for every branch.
+    Auto-regressive prediction in q-vector (transformer embedding) space.
     
-    This function samples latent candidates from the prior computed from the
-    final hidden state (h_list[-1]) and then, for each candidate, updates the branch
-    by overriding the latent in the first VRNN cell and propagating through subsequent cells.
+    The VRNN decodes to a q-vector (the predicted embedding), and we assume that
+    this is the mean of a Gaussian distribution. At each step we sample candidate
+    q-vectors around that mean, compute their Gaussian log-probabilities (up to a constant),
+    select the top_k most probable candidates, and recursively feed them back into the model.
     
     Args:
-        vrnn: The multi-layer VRNN module. It must provide:
-              - x_dim, h_dim, z_dim attributes.
-              - vrnn.vrnn_cells: a list of VRNN cells.
-              - vrnn.prior_net(h): given a hidden state (typically the last layer), returns
-                a tensor of shape (B, 2*z_dim) to be split into mean and log_std.
-              - vrnn.dec_net(input): decoder network that maps (z + h) -> x.
-        h_init: List of hidden state tensors (one per VRNN layer), each of shape (B, h_dim).
-        steps: Number of future timesteps to predict.
-        top_k: Beam search branching factor.
-        n_candidates: Number of latent candidates to sample per branch.
+        last_q: Tensor of shape (B, x_dim) – last observed q-vector.
+        vrnn: A multi-layer VRNN model. Its attribute `vrnn_cells` is a list of cells.
+              Each cell takes an input q-vector and a hidden state and returns a tuple:
+                (x_hat, new_hidden, latent r-vector).
+              Here, x_hat is a q-vector prediction.
+        h_init: List of hidden state tensors (one per VRNN cell), each of shape (B, h_dim).
+        steps: Number of future time steps to predict.
+        top_k: Beam search branching factor (number of candidates to keep per branch per step).
+        n_candidates: Number of candidate samples to draw (per branch) before pruning.
+        sigma: Standard deviation used for sampling candidate q-vectors from the Gaussian
+               centered at the predicted q-vector.
     
     Returns:
-        pred_seq: Tensor of shape (B, steps, x_dim) representing the predicted extension.
+        pred_seq_tensor: Tensor of shape (B, steps, x_dim) – the predicted q-vector sequence
+                         from the best branch.
+        best_prob_history: List (length = steps) of tuples with candidate probability data at each step.
+                           Each tuple is (candidate_log_probs, candidate_indices) for that step.
+                           (This records the probability matrix before pruning at each step.)
     """
-    B = h_init[0].size(0)
-    device = h_init[0].device
-    # Start with an initial token (could be zeros or last observed token).
+    B, x_dim = last_q.shape
+    device = last_q.device
     
     # Each beam branch is a tuple:
-    # (latent_seq, h_list, cum_logp, last_x)
-    #   latent_seq: list of candidate latent z's (each shape (B, z_dim)) chosen so far.
-    #   h_list: list of hidden state tensors (one per cell/layer) for this branch.
-    #   cum_logp: cumulative log-probability (tensor, shape (B,))
-    #   last_x: last output token (tensor, shape (B, x_dim))
-    branches = deque()
-    branches.append(([], h_init, torch.zeros(B, device=device), last_x))
+    #   (pred_seq, h_list, cum_logp, last_q, prob_history)
+    # where:
+    #   pred_seq: list of predicted q-vectors (each: (B, x_dim))
+    #   h_list: list of hidden state tensors (one per VRNN layer)
+    #   cum_logp: cumulative log probability (Tensor of shape (B,))
+    #   last_q: current q-vector input for this branch (B, x_dim)
+    #   prob_history: list of candidate probability data for each step
+    beams = [( [], h_init, torch.zeros(B, device=device), last_q, [] )]
     
-    # Helper: update a branch with a candidate latent from the prior.
-    # We override the latent in the first VRNN cell with z_candidate, then propagate
-    # forward through the rest of the cells.
-    def update_branch(last_x, h_list, z_candidate):
-        new_h_list = []
-        # --- First cell: override latent ---
-        # Instead of computing z = enc_net(concat(last_x, h_list[0])),
-        # we use z_candidate.
-        dec_in = torch.cat([z_candidate, h_list[0]], dim=-1)  # (B, z_dim + h_dim)
-        x_hat0 = vrnn.vrnn_cells[0].dec_net(dec_in)           # (B, x_dim)
-        trans_in = torch.cat([last_x, z_candidate], dim=-1)     # (B, x_dim + z_dim)
-        h_new0 = vrnn.vrnn_cells[0].activation(vrnn.vrnn_cells[0].trans_net(trans_in))  # (B, h_dim)
-        new_h_list.append(h_new0)
-        
-        # --- Subsequent cells: standard forward pass ---
-        x_in = x_hat0  # propagate output from first cell
-        for layer in range(1, len(h_list)):
-            enc_in = torch.cat([x_in, h_list[layer]], dim=-1)  # expected shape: (B, input_dim)
-            z_tmp = vrnn.vrnn_cells[layer].enc_net(enc_in)       # (B, z_dim)
-            dec_in = torch.cat([z_tmp, h_list[layer]], dim=-1)
-            x_hat = vrnn.vrnn_cells[layer].dec_net(dec_in)       # (B, x_dim)
-            trans_in = torch.cat([x_in, z_tmp], dim=-1)
-            h_new = vrnn.vrnn_cells[layer].activation(vrnn.vrnn_cells[layer].trans_net(trans_in))  # (B, h_dim)
-            new_h_list.append(h_new)
-            x_in = x_hat  # update input for next cell
-        return x_in, new_h_list
-
-    # Beam search loop: each iteration predicts one timestep.
-    for _ in range(steps):
-        new_branches = []
-        while branches:
-            latent_seq, h_list, cum_logp, last_x = branches.popleft()
+    for step in range(steps):
+        new_beams = []
+        # Expand every branch in the beam.
+        for branch in beams:
+            pred_seq, h_list, cum_logp, last_q, prob_history = branch
             
-            # Compute prior distribution from the final layer's hidden state.
-            prior_out = vrnn.vrnn_cells[-1].prior_net(h_list[-1])
-            mu, log_sigma = prior_out.chunk(2, dim=-1)
-            sigma = torch.exp(log_sigma)
+            # Run one forward step through all VRNN layers.
+            x_in = last_q
+            new_h_list = []
+            for cell, h in zip(vrnn.vrnn_cells, h_list):
+                # Each cell returns (x_hat, new_hidden, r-vector); we only need x_hat and new_hidden.
+                x_out, h_new, _ = cell(x_in, h)
+                new_h_list.append(h_new)
+                x_in = x_out
+            # x_in is the VRNN's decoded prediction (a q-vector), which we treat as the mean.
+            q_hat = x_in  # shape: (B, x_dim)
             
-            # Sample latent candidates.
-            eps = torch.randn(B, n_candidates, vrnn.z_dim, device=device)
-            z_candidates = mu.unsqueeze(1) + sigma.unsqueeze(1) * eps  # (B, n_candidates, z_dim)
+            # Sample n_candidates candidate q-vectors around q_hat.
+            # candidate_q shape: (B, n_candidates, x_dim)
+            candidate_q = q_hat.unsqueeze(1) + sigma * torch.randn(B, n_candidates, x_dim, device=device)
             
-            # Compute (unnormalized) log-probability under the prior.
-            diff = (z_candidates - mu.unsqueeze(1)) / (sigma.unsqueeze(1) + 1e-8)
-            candidate_logp = -0.5 * torch.sum(diff**2, dim=-1)  # (B, n_candidates)
-            candidate_logp = cum_logp.unsqueeze(1) + candidate_logp  # (B, n_candidates)
+            # Compute (unnormalized) log probability for each candidate under N(q_hat, sigma^2 I).
+            # (Ignoring constant terms, the log probability is proportional to -||candidate - q_hat||^2.)
+            candidate_log_prob = -0.5 * torch.sum(((candidate_q - q_hat.unsqueeze(1)) / sigma)**2, dim=-1)  # (B, n_candidates)
             
-            # For each branch (per batch element), select top_k candidates.
-            topk_logp, topk_idx = candidate_logp.topk(k=top_k, dim=1)  # each: (B, top_k)
-            # Gather the corresponding latent candidates.
-            z_topk = torch.gather(z_candidates, 1,
-                                  topk_idx.unsqueeze(-1).expand(-1, -1, vrnn.z_dim))  # (B, top_k, z_dim)
+            # Select the top_k candidates for each branch.
+            topk_vals, topk_idx = candidate_log_prob.topk(k=top_k, dim=1)  # each: (B, top_k)
+            # Gather the corresponding candidate q-vectors.
+            # Expand topk_idx to match candidate_q's last dimension.
+            candidate_q_topk = torch.gather(candidate_q, 1, topk_idx.unsqueeze(-1).expand(-1, -1, x_dim))  # (B, top_k, x_dim)
             
-            # For each candidate fork, update the branch.
+            # For each candidate in the top_k, create a new branch.
             for i in range(top_k):
-                z_candidate = z_topk[:, i, :]  # (B, z_dim)
-                new_last_x, new_h_list = update_branch(last_x, h_list, z_candidate)
-                new_latent_seq = latent_seq + [z_candidate]
-                new_cum_logp = topk_logp[:, i]
-                new_branches.append((new_latent_seq, new_h_list, new_cum_logp, new_last_x))
+                # Extract the candidate q-vector and its log probability.
+                candidate = candidate_q_topk[:, i, :]          # (B, x_dim)
+                candidate_logp = topk_vals[:, i]                 # (B,)
+                
+                new_pred_seq = pred_seq + [candidate]            # Append candidate to branch's sequence.
+                new_cum_logp = cum_logp + candidate_logp         # Update cumulative log probability.
+                # Append the candidate probability distribution data for this step.
+                new_prob_history = prob_history + [(topk_vals, topk_idx)]
+                
+                # Create new branch with updated hidden states and candidate as new last_q.
+                new_branch = (new_pred_seq, new_h_list, new_cum_logp, candidate, new_prob_history)
+                new_beams.append(new_branch)
         
-        # Prune: sort branches by average cumulative log-probability and keep top_k branches.
-        new_branches = sorted(new_branches, key=lambda tup: tup[2].mean().item(), reverse=True)[:top_k]
-        branches = deque(new_branches)
+        # Prune: sort all new branches by the average cumulative log probability and keep the top_k overall.
+        new_beams = sorted(new_beams, key=lambda b: b[2].mean().item(), reverse=True)[:top_k]
+        beams = new_beams
     
-    # After all steps, each branch has a latent sequence (list of length 'steps').
-    latent_seqs = [torch.stack(branch[0], dim=1) for branch in branches]  # each: (B, steps, z_dim)
-    # Average latent sequences across the beam.
-    avg_latent_seq = torch.stack(latent_seqs, dim=0).mean(dim=0)  # (B, steps, z_dim)
+    # After all steps, select the best branch.
+    best_branch = beams[0]
+    best_pred_seq, best_h, best_cum_logp, best_last_q, best_prob_history = best_branch
     
-    # Finally, decode the averaged latent sequence.
-    decoded_steps = []
-    # Use a placeholder hidden state if needed (here we assume one layer for decoding).
-    h_placeholder = torch.zeros(B, vrnn.h_dim, device=device)
-    for t in range(steps):
-        z_t = avg_latent_seq[:, t, :]  # (B, z_dim)
-        dec_in = torch.cat([z_t, h_placeholder], dim=-1)  # (B, z_dim + h_dim)
-        x_t = vrnn.vrnn_cells[0].dec_net(dec_in)
-        decoded_steps.append(x_t)
-    pred_seq = torch.stack(decoded_steps, dim=1)  # (B, steps, x_dim)
-    return pred_seq
+    # Stack the predicted q-vectors into a tensor of shape (B, steps, x_dim).
+    pred_seq_tensor = torch.stack(best_pred_seq, dim=1)
+    
+    return pred_seq_tensor
+
 
             
 
@@ -525,7 +510,7 @@ class GPT(nn.Module):
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.cond_vrnn = CustomVRNN(
-                seq_len=10,
+                seq_len=25,
                 x_dim=config.n_embd,
                 h_dim=8,
                 z_dim=config.n_embd,
