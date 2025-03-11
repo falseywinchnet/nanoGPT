@@ -635,7 +635,7 @@ class GPT(nn.Module):
 
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
         x = x * dropout_mask  
-       total_vrnn_loss = 0.0
+        total_vrnn_loss = 0.0
 
         # Pass through each block
         for i, block in enumerate(self.transformer.residual):
