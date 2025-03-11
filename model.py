@@ -182,11 +182,10 @@ class CustomVRNN(nn.Module):
         x_hat_seq, new_h_states, z_seq = [], [], []
 
         for t in range(seq_len):  # Iterate through sequence
-            x_t = x[:, t, :]  # Get the t-th timestep embedding
             new_h = []
 
             for layer_idx, cell in enumerate(self.vrnn_cells):
-                x_t, h_t, z_t = cell(x_t, h_prev[layer_idx])
+                x_t, h_t, z_t = cell(x, h_prev[layer_idx])
                 new_h.append(h_t)  # Update hidden state
 
             h_prev = new_h  # Store updated hidden states
