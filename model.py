@@ -156,7 +156,7 @@ class CustomVRNN(nn.Module):
 
         # Stacked VRNN cells
         self.vrnn_cells = nn.ModuleList([
-            CustomVRNNCell(x_dim if i == 0 else h_dim, h_dim, z_dim) 
+            CustomVRNNCell(x_dim, h_dim, z_dim) 
             for i in range(num_layers)
         ])
 
