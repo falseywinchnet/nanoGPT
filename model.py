@@ -595,7 +595,7 @@ class GPT(nn.Module):
         b, original_t = idx.shape
 
         # ---- Normal single forward pass for the given sequence ----
-        x = self._run_transformer(idx)  # shape (b, t, n_embd)
+        x,v_loss = self._run_transformer(idx)  # shape (b, t, n_embd)
         
         if return_features:
             # If we want the final hidden states:
@@ -612,6 +612,8 @@ class GPT(nn.Module):
                     targets.view(-1),
                     ignore_index=-1
                 )
+                lambda_vrnn = 0.1  # Hyperparameter to weigh the VRNN loss.
+                loss = loss + lambda_vrnn * vrnn_loss_total
             return logits, loss
 
 
