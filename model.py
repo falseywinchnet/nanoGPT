@@ -154,6 +154,34 @@ class ComplexConditionalVRNNCell(nn.Module):
 
 
 from collections import deque
+# Debugging and new top-k selection approach
+def debug_sort_branches(next_branches, top_k):
+    # Print out the average cumulative log probability for each branch
+    print("Initial branch averages:")
+    for idx, branch in enumerate(next_branches):
+        avg_val = branch[2].mean().item()
+        print(f"Branch {idx}: avg cumulative logp = {avg_val}")
+    
+    # Create a tensor of keys (averages) from the branches
+    keys = torch.stack([branch[2].mean() for branch in next_branches])
+    print("Keys tensor:", keys)
+    
+    # Use torch.topk to select the indices of the top_k branches (largest first)
+    topk_vals, topk_indices = torch.topk(keys, k=min(top_k, len(next_branches)), largest=True)
+    print("Top-k indices:", topk_indices)
+    print("Top-k values:", topk_vals)
+    
+    # Convert indices to a flat list of integers and select the corresponding branches
+    selected_branches = [next_branches[i] for i in topk_indices.tolist()]
+    
+    # Print out the averages of the selected branches for verification
+    print("Selected branch averages:")
+    for idx, branch in enumerate(selected_branches):
+        avg_val = branch[2].mean().item()
+        print(f"Selected branch {idx}: avg cumulative logp = {avg_val}")
+    
+    return selected_branches
+
 
 def auto_regressive_predict(cell, h_init, steps, top_k=5, n_candidates=20):
     """
@@ -222,19 +250,8 @@ def auto_regressive_predict(cell, h_init, steps, top_k=5, n_candidates=20):
                 new_last_x = x_dec[:, i, :]     # (B, x_dim)
                 # Append this branch.
                 next_branches.append((new_latent_seq, h_new[:, i, :], new_cum_logp, new_last_x))
-            # Prune branches: sort by average cumulative logp (higher is better)
-            # Convert list of tuples to tensors
-            # Convert list of tuples to tensors (compute cumulative log probabilities)
-            # Stack all log probabilities into a single tensor
-            cumulative_logps = torch.stack([tup[2].mean() for tup in next_branches])  # (num_branches,)
-            
-            # Sort and retrieve top_k indices
-            _, top_indices = torch.topk(cumulative_logps, k=min(top_k, len(next_branches)), largest=True)
-            
-            # Extract the corresponding next_branches
-            next_branches = [next_branches[i] for i in top_indices.tolist()]
 
-
+            next_branches = debug_sort_branches(next_branches, top_k)
 
 
             queue = deque(next_branches)
