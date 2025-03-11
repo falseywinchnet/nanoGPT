@@ -355,8 +355,10 @@ class CausalSelfAttention(nn.Module):
         for t in range(T):
             x_t = x_complex[:, t, :]  # (B, 2C)
             x_hat, h, z = self.cond_vrnn(x_t, h)
-            
-        pred_complex = auto_regressive_predict(self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
+                    
+        with torch.no_grad():
+            pred_complex = auto_regressive_predict(self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
+            #dont backprop this because its a ucking hyrdra
 
         pred_real, pred_imag = pred_complex.split(C, dim=-1)  # each: (B, steps, C)
         
@@ -424,7 +426,7 @@ class CausalSelfAttention(nn.Module):
         y = y[:,:T,:]#truncate
         # Output projection
         y = self.resid_dropout(self.c_proj(y))
-        return y
+        return y,z
 
 class RainstarActivation(nn.Module):
     def __init__(self, gammaval=8):
@@ -469,15 +471,17 @@ class Block(nn.Module):
 
             # Apply normalization and attention (using the residual)
             x = self.ln_1(x)
-            x = self.attn(x, rope_freqs)
+            x ,z = self.attn(x, rope_freqs)
 
             # Apply normalization and MLP (using the residual)
             x = self.ln_2(x)
             x = self.mlp(x)
-            # Add the residual after each iteration to refine the result
+
             x = x + residual
 
-        return x
+        z_prime = x[:, -1, :]  # for example
+        vrnn_loss = F.mse_loss(z, z_prime)
+        return x,vrnn_loss
     
 @dataclass
 class GPTConfig:
@@ -629,14 +633,16 @@ class GPT(nn.Module):
 
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
         x = x * dropout_mask  
+       total_vrnn_loss = 0.0
 
         # Pass through each block
         for i, block in enumerate(self.transformer.residual):
-            x = block(x, rope_freqs=self.rope_freqs)   
+            x,v_loss = block(x, rope_freqs=self.rope_freqs)   
+            total_vrnn_loss = total_vrnn_loss + v_loss
 
         # Final layernorm
         x = self.transformer.ln_f(x)
-        return x
+        return x,total_vrnn_loss
     
         
     def crop_block_size(self, block_size):
