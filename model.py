@@ -354,11 +354,11 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size()
         #x2 = compute_phase_embedding(x)
         #x = x + x2/T
-        if model.training:
+        if torch.is_grad_enabled():
            h = None #reset anew
            x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :], h)  # Pass batch through VRNN
 
-        if not model.training:
+        else:
             h = self.h_safe
             x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
 
