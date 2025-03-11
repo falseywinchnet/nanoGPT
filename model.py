@@ -225,16 +225,15 @@ def auto_regressive_predict(cell, h_init, steps, top_k=5, n_candidates=20):
             # Prune branches: sort by average cumulative logp (higher is better)
             # Convert list of tuples to tensors
             # Convert list of tuples to tensors (compute cumulative log probabilities)
-            cumulative_logps = torch.tensor([tup[2].mean() for tup in next_branches], device=torch.device("cpu"))
+            # Stack all log probabilities into a single tensor
+            cumulative_logps = torch.stack([tup[2].mean() for tup in next_branches])  # (num_branches,)
             
-            # Get sorting indices (descending order)
-            sorted_indices = torch.argsort(cumulative_logps, descending=True)
+            # Sort and retrieve top_k indices
+            _, top_indices = torch.topk(cumulative_logps, k=min(top_k, len(next_branches)), largest=True)
             
-            # Take top_k elements
-            top_indices = sorted_indices[:top_k]
-            
-            # Apply these indices to extract top_k branches
+            # Extract the corresponding next_branches
             next_branches = [next_branches[i] for i in top_indices.tolist()]
+
 
 
 
