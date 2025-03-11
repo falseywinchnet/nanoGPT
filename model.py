@@ -683,7 +683,7 @@ class GPT(nn.Module):
         # Final layernorm
         x = self.transformer.ln_f(x)
         x = x[:,:t,:]
-        z_prime = x[:, -max(0,t-25):, :]  # for example
+        z_prime = x[:, -x_hat.shape[1]:, :]  # for example
         print("zprime", z_prime.shape)
         lambda_mse = 0.5
         lambda_cos = 0.5 #heca8se we want patterns
