@@ -156,30 +156,12 @@ class ComplexConditionalVRNNCell(nn.Module):
 from collections import deque
 # Debugging and new top-k selection approach
 def debug_sort_branches(next_branches, top_k):
-    # Print out the average cumulative log probability for each branch
-    print("Initial branch averages:")
-    for idx, branch in enumerate(next_branches):
-        avg_val = branch[2].mean().item()
-        print(f"Branch {idx}: avg cumulative logp = {avg_val}")
-    
-    # Create a tensor of keys (averages) from the branches
     keys = torch.stack([branch[2].mean() for branch in next_branches])
-    print("Keys tensor:", keys)
-    
     # Use torch.topk to select the indices of the top_k branches (largest first)
     topk_vals, topk_indices = torch.topk(keys, k=min(top_k, len(next_branches)), largest=True)
-    print("Top-k indices:", topk_indices)
-    print("Top-k values:", topk_vals)
     
     # Convert indices to a flat list of integers and select the corresponding branches
     selected_branches = [next_branches[i] for i in topk_indices.tolist()]
-    
-    # Print out the averages of the selected branches for verification
-    print("Selected branch averages:")
-    for idx, branch in enumerate(selected_branches):
-        avg_val = branch[2].mean().item()
-        print(f"Selected branch {idx}: avg cumulative logp = {avg_val}")
-    
     return selected_branches
 
 
