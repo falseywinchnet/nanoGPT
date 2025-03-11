@@ -287,8 +287,7 @@ def ingest_sequence(cell, x_complex):
         x_hat_list.append(x_hat)
 
     x_hat_seq = torch.stack(x_hat_list, dim=1)
-    return x_hat_seq, h
-
+    return x_hat_seq, h,z
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -351,11 +350,7 @@ class CausalSelfAttention(nn.Module):
         x2 = compute_phase_embedding(x)
         x_complex = torch.cat([x, x2], dim=-1)  # (B, T, 2C)
 
-        h = torch.zeros(B, self.cond_vrnn.h_dim, device=x.device)
-        for t in range(T):
-            x_t = x_complex[:, t, :]  # (B, 2C)
-            x_hat, h, z = self.cond_vrnn(x_t, h)
-                    
+        x_hat_seq, h,z = ingest_sequence(self.cond_vrnn,x_complex) 
         with torch.no_grad():
             pred_complex = auto_regressive_predict(self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
             #dont backprop this because its a ucking hyrdra
