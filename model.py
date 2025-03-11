@@ -318,7 +318,7 @@ class CausalSelfAttention(nn.Module):
     
         # Output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.h_safe= torch.zeros(1, self.cond_vrnn.h_dim, device=x.device)
+        self.h_safe= torch.zeros(1, self.cond_vrnn.h_dim)
 
         # Dropouts
         self.attn_dropout = nn.Dropout(config.dropout)
