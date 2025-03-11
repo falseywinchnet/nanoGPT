@@ -361,7 +361,7 @@ class CausalSelfAttention(nn.Module):
         
         # Reshape
         y = y.transpose(1, 2).contiguous().view(B, T_aug, C)
-        y = y[:,:T,:]#truncate
+        y = y[:,:T,:]  #truncate
         # Output projection
         y = self.resid_dropout(self.c_proj(y))
         return y,z
@@ -401,25 +401,24 @@ class Block(nn.Module):
         self.mlp = MLP(config)
     
     def forward(self, x, rope_freqs, num_iterations=3):
-        """
-        Iteratively apply attention and MLP with residuals over multiple steps.
-        """
-        for _ in range(num_iterations):  # Number of recurrence steps
+            """
+            Iteratively apply attention and MLP with residuals over multiple steps.
+            """
             residual = x  # Capture the original input as the residual
-
+            
             # Apply normalization and attention (using the residual)
             x = self.ln_1(x)
             x ,z = self.attn(x, rope_freqs)
-
+            
             # Apply normalization and MLP (using the residual)
             x = self.ln_2(x)
             x = self.mlp(x)
-
+            z_prime = x[:, -1, :]  # for example
+            vrnn_loss = F.mse_loss(z, z_prime)
             x = x + residual
 
-        z_prime = x[:, -1, :]  # for example
-        vrnn_loss = F.mse_loss(z, z_prime)
-        return x,vrnn_loss
+            
+            return x,vrnn_loss
     
 @dataclass
 class GPTConfig:
