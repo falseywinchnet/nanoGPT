@@ -652,7 +652,7 @@ class GPT(nn.Module):
             
         with torch.no_grad():
 
-            pred= auto_regressive_predict(x[:, -1, :],self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
+            pred= auto_regressive_predict_q(x[:, -1, :],self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
             #dont backprop this because its a ucking hyrdra
 
         x = torch.cat([x, pred], dim=1)   # (B, T+steps, C)
