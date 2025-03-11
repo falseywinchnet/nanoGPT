@@ -218,7 +218,8 @@ class CustomVRNN(nn.Module):
         x_hat_seq = torch.stack(x_hat_seq, dim=1)
         z_seq = torch.stack(z_seq, dim=1)
 
-        return x_hat_seq, new_h, z_seq
+        return x_hat_seq, new_h, z_seq[:, -1, :]  # Only take the last step’s latent and z.
+
 
 
 from collections import deque
@@ -460,7 +461,7 @@ class CausalSelfAttention(nn.Module):
         y = y[:,:T,:]  #truncate
         # Output projection
         y = self.resid_dropout(self.c_proj(y))
-        return y,z[:, -1, :]
+        return y,z
 
 class RainstarActivation(nn.Module):
     def __init__(self, gammaval=8):
