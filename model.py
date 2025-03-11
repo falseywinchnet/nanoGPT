@@ -317,6 +317,7 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size()
         x2 = compute_phase_embedding(x)
         x_complex = torch.cat([x, x2], dim=-1)  # (B, T, 2C)
+        h = torch.zeros(B, self.cond_vrnn.h_dim, device=x.device)
 
         for t in range(max(0,T-5),T): #only consider last five steps
             x_t = x_complex[:, t, :]  # (B, 2C)
