@@ -669,21 +669,21 @@ class GPT(nn.Module):
             #dont backprop this because its a ucking hyrdra
 
         x = torch.cat([x, pred], dim=1)   # (B, T+steps, C)
-        T_aug = x_aug.size(1)
                 
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
         x = x * dropout_mask  
-        z_prime = x[:, -1, :]  # for example
-        lambda_mse = 0.5
-        lambda_cos = 0.5 #heca8se we want patterns
-        vrnn_loss = lambda_mse * F.mse_loss(z, z_prime) + lambda_cos * (1 - F.cosine_similarity(z, z_prime, dim=-1).mean())
-
+       
         # Pass through each block
         for i, block in enumerate(self.transformer.residual):
             x = block(x, rope_freqs=self.rope_freqs)   
 
         # Final layernorm
         x = self.transformer.ln_f(x)
+        z_prime = x[:, t, :]  # for example
+        lambda_mse = 0.5
+        lambda_cos = 0.5 #heca8se we want patterns
+        vrnn_loss = lambda_mse * F.mse_loss(z, z_prime) + lambda_cos * (1 - F.cosine_similarity(z, z_prime, dim=-1).mean())
+                
         return x[:,:t,:],total_vrnn_loss
     
         
