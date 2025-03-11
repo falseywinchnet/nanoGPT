@@ -664,7 +664,6 @@ class GPT(nn.Module):
         else:
             h = [h.to(x.device) for h in self.h_safe]  # Ensure h_safe is on the same device as x 
             x_hat, h, z = self.cond_vrnn(x[:, max(0,t-25):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
-        print(x_hat.shape)
             
         with torch.no_grad():
 
@@ -684,7 +683,6 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
         x = x[:,:t,:]
         z_prime = x[:, -x_hat.shape[1]:, :]  # for example
-        print("zprime", z_prime.shape)
         lambda_mse = 0.5
         lambda_cos = 0.5 #heca8se we want patterns
         vrnn_loss = lambda_mse * F.mse_loss(x_hat, z_prime) + lambda_cos * (1 - F.cosine_similarity(x_hat, z_prime, dim=-1).mean())
