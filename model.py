@@ -83,86 +83,122 @@ class LayerNorm(nn.Module):
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
-class ComplexConditionalVRNNCell(nn.Module):
+
+
+
+class CustomVRNNCell(nn.Module):
     def __init__(self, x_dim, h_dim, z_dim):
         """
-        x_dim: dimension of complex input (i.e. 2 * embed_dim)
-        h_dim: hidden state dimension
-        z_dim: latent variable dimension
+        x_dim: Input embedding dimension (same as Transformer hidden size)
+        h_dim: Hidden state size
+        z_dim: Latent variable dimension
         """
         super().__init__()
         self.x_dim = x_dim
         self.h_dim = h_dim
         self.z_dim = z_dim
 
-        # Inference network: q(z_t | x_t, h_{t-1})
-        self.enc_net = nn.Sequential(
-            nn.Linear(x_dim + h_dim, 2*  z_dim),
-            nn.Tanh(),
-            nn.Linear(2 * z_dim, 2 * z_dim)
-        )
-        # Prior network: p(z_t | h_{t-1})
-        self.prior_net = nn.Sequential(
-            nn.Linear(h_dim, 2 * z_dim),
-            nn.Tanh(),
-            nn.Linear(2 * z_dim, 2 * z_dim)
-        )
-        # Decoder network: decodes x_t from [z_t, h_{t-1}]
-        self.dec_net = nn.Sequential(
-            nn.Linear(z_dim + h_dim, 2 * x_dim),
-            nn.Tanh(),
-            nn.Linear(2 * x_dim, x_dim)
-        )
-        # RNN update: updates hidden state from [x_t, z_t]
-        self.rnn = nn.GRUCell(x_dim + z_dim, h_dim)
+        # Encoder: Produces latent representation z from input and previous state
+        self.enc_net = nn.Linear(x_dim + h_dim, z_dim)
+        
+        # Decoder: Reconstructs input x from latent z and hidden state
+        self.dec_net = nn.Linear(z_dim + h_dim, x_dim)
+
+        # Custom state transition (instead of GRU)
+        self.trans_net = nn.Linear(x_dim + z_dim, h_dim)
+
+        # Activation function
         self.activation = nn.GELU()
 
     def forward(self, x, h_prev):
         """
         Args:
-          x: (B, x_dim) — current complex input (real and imag concatenated)
-          h_prev: (B, h_dim) — previous hidden state
+            x: (B, x_dim) – Current input embedding.
+            h_prev: (B, h_dim) – Previous hidden state.
+
         Returns:
-          x_hat: predicted x (B, x_dim)
-          h_new: updated hidden state (B, h_dim)
-          z: sampled latent (B, z_dim)
+            x_hat: (B, x_dim) – Reconstructed x.
+            h_new: (B, h_dim) – Updated hidden state.
+            z: (B, z_dim) – Sampled latent representation.
         """
-        # Inference: condition on x and h_prev
+        # Encode input and previous state into latent z
         enc_input = torch.cat([x, h_prev], dim=-1)
-        enc_out = self.enc_net(enc_input)
-        mu_enc, log_sigma_enc = enc_out.chunk(2, dim=-1)
-        sigma_enc = torch.exp(log_sigma_enc)
+        z = self.enc_net(enc_input)
 
-        # Sample latent from q(z|x,h)
-        eps = torch.randn_like(sigma_enc)
-        z = mu_enc + sigma_enc * eps
-
-        # Prior from h_prev
-        prior_out = self.prior_net(h_prev)
-        mu_prior, log_sigma_prior = prior_out.chunk(2, dim=-1)
-        sigma_prior = torch.exp(log_sigma_prior)
-
-        # Decode: predict x_hat
+        # Decode latent z and hidden state to reconstruct x_hat
         dec_input = torch.cat([z, h_prev], dim=-1)
         x_hat = self.dec_net(dec_input)
 
-        # Update hidden state
-        rnn_input = torch.cat([x, z], dim=-1)
-        h_new = self.rnn(rnn_input, h_prev)
+        # Custom state transition (Instead of GRU)
+        trans_input = torch.cat([x, z], dim=-1)
+        h_new = self.activation(self.trans_net(trans_input))
 
         return x_hat, h_new, z
 
 
-from collections import deque
-# Debugging and new top-k selection approach
-def debug_sort_branches(next_branches, top_k):
-    keys = torch.stack([branch[2].mean() for branch in next_branches])
-    # Use torch.topk to select the indices of the top_k branches (largest first)
-    topk_vals, topk_indices = torch.topk(keys, k=min(top_k, len(next_branches)), largest=True)
-    
-    # Convert indices to a flat list of integers and select the corresponding branches
-    selected_branches = [next_branches[i] for i in topk_indices.tolist()]
-    return selected_branches
+class CustomVRNN(nn.Module):
+    def __init__(self, seq_len, x_dim, h_dim, z_dim, num_layers=2):
+        """
+        Variational RNN model that operates as a predictive layer before attention.
+        
+        Args:
+            seq_len: Maximum sequence length.
+            x_dim: Transformer hidden size (input dimension).
+            h_dim: Hidden state size.
+            z_dim: Latent variable size.
+            num_layers: Number of stacked VRNN layers.
+        """
+        super().__init__()
+        self.seq_len = seq_len
+        self.h_dim = h_dim
+        self.z_dim = z_dim
+        self.num_layers = num_layers
+
+        # Stacked VRNN cells
+        self.vrnn_cells = nn.ModuleList([
+            CustomVRNNCell(x_dim if i == 0 else h_dim, h_dim, z_dim) 
+            for i in range(num_layers)
+        ])
+
+    def forward(self, x, h_prev=None):
+        """
+        Processes a batch of input embeddings through VRNN layers.
+        
+        Args:
+            x: (B, T, x_dim) – Input sequence embeddings.
+            h_prev: (List of tensors) – Previous hidden states for each layer.
+
+        Returns:
+            x_hat: (B, T, x_dim) – Reconstructed input.
+            h_new: List[(B, h_dim)] – Updated hidden states per layer.
+            z_seq: (B, T, z_dim) – Latent sequence.
+        """
+        batch_size, seq_len, _ = x.shape
+
+        # Initialize hidden states if not provided
+        if h_prev is None:
+            h_prev = [torch.zeros(batch_size, self.h_dim, device=x.device) for _ in range(self.num_layers)]
+
+        x_hat_seq, new_h_states, z_seq = [], [], []
+
+        for t in range(seq_len):  # Iterate through sequence
+            x_t = x[:, t, :]  # Get the t-th timestep embedding
+            new_h = []
+
+            for layer_idx, cell in enumerate(self.vrnn_cells):
+                x_t, h_t, z_t = cell(x_t, h_prev[layer_idx])
+                new_h.append(h_t)  # Update hidden state
+
+            h_prev = new_h  # Store updated hidden states
+            x_hat_seq.append(x_t)  # Store reconstructed x
+            z_seq.append(z_t)  # Store latent z
+
+        # Stack sequences back into (B, T, *)
+        x_hat_seq = torch.stack(x_hat_seq, dim=1)
+        z_seq = torch.stack(z_seq, dim=1)
+
+        return x_hat_seq, new_h, z_seq
+
 
 
 def auto_regressive_predict(cell, h_init, steps, top_k=5, n_candidates=20):
@@ -266,11 +302,14 @@ class CausalSelfAttention(nn.Module):
         self.flash = hasattr(F, 'scaled_dot_product_attention')
         self.use_rope = config.use_rope
         self.noise_alpha = config.noise_alpha
-        self.cond_vrnn = ComplexConditionalVRNNCell(
-            x_dim = config.n_embd,  # complex input dimension
-            h_dim = 8,
-            z_dim = config.n_embd
+        self.cond_vrnn = CustomVRNN(
+                seq_len=config.block_size,
+                x_dim=config.n_embd,
+                h_dim=8,
+                z_dim=config.n_embd,
+                num_layers=2
         )
+        
         self.top_k = 5
         self.steps = 5
 
@@ -279,7 +318,8 @@ class CausalSelfAttention(nn.Module):
     
         # Output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        
+        self.h_safe= torch.zeros(B, self.cond_vrnn.h_dim, device=x.device)
+
         # Dropouts
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
@@ -314,11 +354,15 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size()
         #x2 = compute_phase_embedding(x)
         #x = x + x2/T
-        h = torch.zeros(B, self.cond_vrnn.h_dim, device=x.device)
+        if torch.training:
+           h = torch.zeros(B, self.cond_vrnn.h_dim, device=x.device)
+           x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :] .unsqueeze(1), h)  # Pass batch through VRNN
 
-        for t in range(max(0,T-5),T): #only consider last five steps
-            x_t = x[:, t, :]  # (B, 2C)
-            x_hat, h, z = self.cond_vrnn(x_t, h)
+        else:
+            h = self.h_safe
+            x_hat, h, z = self.cond_vrnn(x[:, -1, :] .unsqueeze(1), h)  # Pass batch through VRNN
+
+            
         with torch.no_grad():
             pred= auto_regressive_predict(self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
             #dont backprop this because its a ucking hyrdra
