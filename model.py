@@ -359,23 +359,13 @@ class CausalSelfAttention(nn.Module):
         self.flash = hasattr(F, 'scaled_dot_product_attention')
         self.use_rope = config.use_rope
         self.noise_alpha = config.noise_alpha
-        self.cond_vrnn = CustomVRNN(
-                seq_len=10,
-                x_dim=config.n_embd,
-                h_dim=8,
-                z_dim=config.n_embd,
-                num_layers=2
-        )
         
-        self.top_k = 5
-        self.steps = 5
 
         # ---- Primary Q,K,V ----
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
     
         # Output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.h_safe= [torch.zeros(1, self.cond_vrnn.h_dim) for _ in range(self.cond_vrnn.num_layers)]
 
         # Dropouts
         self.attn_dropout = nn.Dropout(config.dropout)
@@ -411,32 +401,16 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size()
         #x2 = compute_phase_embedding(x)
         #x = x + x2/T
-        if torch.is_grad_enabled():
-           h = None #reset anew
-           x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :], h)  # Pass batch through VRNN
-
-        else:
-            h = [h.to(x.device) for h in self.h_safe]  # Ensure h_safe is on the same device as x
-         
-                    
-            x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
-
-            
-        with torch.no_grad():
-
-            pred= auto_regressive_predict(x[:, -1, :],self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
-            #dont backprop this because its a ucking hyrdra
 
         
         # 4. Append the predicted extensions to the original x and x2.
-        x_aug = torch.cat([x, pred], dim=1)   # (B, T+steps, C)
-        T_aug = x_aug.size(1)
+        
 
         # ---- Primary pass Q,K,V ----
         q, k, v = self.c_attn(x_aug).split(self.n_embd, dim=2)
-        q = q.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
-        k = k.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
-        v = v.view(B, T_aug, self.n_head, C // self.n_head).transpose(1, 2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
         noise = torch.randn_like(q) * self.noise_alpha
         v_pos = v + noise
@@ -464,11 +438,11 @@ class CausalSelfAttention(nn.Module):
 
         
         # Reshape
-        y = y.transpose(1, 2).contiguous().view(B, T_aug, C)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = y[:,:T,:]  #truncate
         # Output projection
         y = self.resid_dropout(self.c_proj(y))
-        return y,z
+        return y
 
 class RainstarActivation(nn.Module):
     def __init__(self, gammaval=8):
@@ -517,14 +491,10 @@ class Block(nn.Module):
             # Apply normalization and MLP (using the residual)
             x = self.ln_2(x)
             x = self.mlp(x)
-            z_prime = x[:, -1, :]  # for example
-            lambda_mse = 0.5
-            lambda_cos = 0.5 #heca8se we want patterns
-            vrnn_loss = lambda_mse * F.mse_loss(z, z_prime) + lambda_cos * (1 - F.cosine_similarity(z, z_prime, dim=-1).mean())
             x = x + residual
 
             
-            return x,vrnn_loss
+            return x
     
 @dataclass
 class GPTConfig:
@@ -557,6 +527,17 @@ class GPT(nn.Module):
             residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
+        self.cond_vrnn = CustomVRNN(
+                seq_len=10,
+                x_dim=config.n_embd,
+                h_dim=8,
+                z_dim=config.n_embd,
+                num_layers=2
+        )
+        self.h_safe= [torch.zeros(1, self.cond_vrnn.h_dim) for _ in range(self.cond_vrnn.num_layers)]
+
+        self.top_k = 5
+        self.steps = 5
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # weight tying: share the weights between the token embedding and the final output layer.
         self.transformer.wte.weight = self.lm_head.weight
@@ -673,15 +654,35 @@ class GPT(nn.Module):
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
         x = tok_emb 
+        if torch.is_grad_enabled():
+           h = None #reset anew
+           x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :], h)  # Pass batch through VRNN
 
+        else:
+            h = [h.to(x.device) for h in self.h_safe]  # Ensure h_safe is on the same device as x
+         
+                    
+            x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
+
+            
+        with torch.no_grad():
+
+            pred= auto_regressive_predict(x[:, -1, :],self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
+            #dont backprop this because its a ucking hyrdra
+
+        x_aug = torch.cat([x, pred], dim=1)   # (B, T+steps, C)
+        T_aug = x_aug.size(1)
+                
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
         x = x * dropout_mask  
-        total_vrnn_loss = 0.0
+        z_prime = x[:, -1, :]  # for example
+        lambda_mse = 0.5
+        lambda_cos = 0.5 #heca8se we want patterns
+        vrnn_loss = lambda_mse * F.mse_loss(z, z_prime) + lambda_cos * (1 - F.cosine_similarity(z, z_prime, dim=-1).mean())
 
         # Pass through each block
         for i, block in enumerate(self.transformer.residual):
-            x,v_loss = block(x, rope_freqs=self.rope_freqs)   
-            total_vrnn_loss = total_vrnn_loss + v_loss
+            x = block(x, rope_freqs=self.rope_freqs)   
 
         # Final layernorm
         x = self.transformer.ln_f(x)
