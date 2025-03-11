@@ -314,8 +314,8 @@ class CausalSelfAttention(nn.Module):
         x2: (B, T, C) secondary embeddings (if any)
         """
         B, T, C = x.size()
-        x2 = compute_phase_embedding(x)
-        x = x + x2/T
+        #x2 = compute_phase_embedding(x)
+        #x = x + x2/T
         h = torch.zeros(B, self.cond_vrnn.h_dim, device=x.device)
 
         for t in range(max(0,T-5),T): #only consider last five steps
