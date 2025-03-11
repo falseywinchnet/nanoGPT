@@ -204,7 +204,7 @@ class CustomVRNN(nn.Module):
 
 from collections import deque
 
-def auto_regressive_predict(vrnn, h_init, steps, top_k=5, n_candidates=20):
+def auto_regressive_predict(last_x, vrnn, h_init, steps, top_k=5, n_candidates=20):
     """
     Auto-regressively predict future timesteps using beam search while preserving
     the full multi-layer hidden state (a list of h's) for every branch.
@@ -231,7 +231,6 @@ def auto_regressive_predict(vrnn, h_init, steps, top_k=5, n_candidates=20):
     B = h_init[0].size(0)
     device = h_init[0].device
     # Start with an initial token (could be zeros or last observed token).
-    last_x = torch.zeros(B, vrnn.x_dim, device=device)
     
     # Each beam branch is a tuple:
     # (latent_seq, h_list, cum_logp, last_x)
@@ -399,7 +398,7 @@ class CausalSelfAttention(nn.Module):
 
             
         with torch.no_grad():
-            pred= auto_regressive_predict(self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
+            pred= auto_regressive_predict(x[:, -1, :],self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
             #dont backprop this because its a ucking hyrdra
 
         
