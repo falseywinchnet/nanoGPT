@@ -359,6 +359,7 @@ class CausalSelfAttention(nn.Module):
            x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :], h)  # Pass batch through VRNN
 
         else:
+            print("Wrongway Feldman was here")
             h = self.h_safe
             x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
 
