@@ -416,11 +416,14 @@ class CausalSelfAttention(nn.Module):
            x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :], h)  # Pass batch through VRNN
 
         else:
-            h = self.h_safe
+            h = [h.to(x.device) for h in self.h_safe]  # Ensure h_safe is on the same device as x
+         
+                    
             x_hat, h, z = self.cond_vrnn(x[:, max(0,T-5):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
 
             
         with torch.no_grad():
+
             pred= auto_regressive_predict(x[:, -1, :],self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
             #dont backprop this because its a ucking hyrdra
 
