@@ -683,7 +683,7 @@ class GPT(nn.Module):
         lambda_cos = 0.5 #heca8se we want patterns
         vrnn_loss = lambda_mse * F.mse_loss(z, z_prime) + lambda_cos * (1 - F.cosine_similarity(z, z_prime, dim=-1).mean())
                 
-        return x[:,:t,:],total_vrnn_loss
+        return x[:,:t,:],vrnn_loss
     
         
     def crop_block_size(self, block_size):
