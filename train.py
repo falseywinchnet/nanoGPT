@@ -1,3 +1,4 @@
+import tiktoken
 """
 This training script can be run both on a single gpu in debug mode,
 and also in a larger training run with distributed data parallel (ddp).
