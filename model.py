@@ -559,8 +559,10 @@ class GPT(nn.Module):
         # Final layernorm
         x = self.transformer.ln_f(x)
         x = x[:,:t,:]
-        z_prime = x[:, -x_hat.shape[1]+1:, :]  # for example
-        vrnn_loss = F.mse_loss(x_hat[:, :-1, :], z_prime) + kl_loss
+        vrnn_loss = 0.0
+        if torch.is_grad_enabled():
+           z_prime = x[:, -x_hat.shape[1]+1:, :]  # for example
+           vrnn_loss = F.mse_loss(x_hat[:, :-1, :], z_prime) + kl_loss
         return x,vrnn_loss
     
         
