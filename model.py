@@ -649,8 +649,6 @@ class GPT(nn.Module):
                 context = x  # (B, 25, embedding_dim)
                 h_new = h  # Maintain hidden state across iterations
             
-                # Initialize empty list to store new embeddings
-                generated_embeddings = []
             
                 # Sequentially generate 25 steps, feeding back each step
                 for _ in range(25):
@@ -661,12 +659,11 @@ class GPT(nn.Module):
                     pred_embedding, h_new, _ = self.cond_vrnn(last_token, h_new)  # (B, 1, embedding_dim)
             
                     # Append to the generated sequence
-                    generated_embeddings.append(pred_embedding)
             
                     # Update context: shift left and append new token
                     x = torch.cat([context[:, 1:, :], pred_embedding], dim=1)
 
-                logits_hat = self.lm_head(generated_embeddings)  # Shape: (B, T, vocab_size)
+                logits_hat = self.lm_head(x[:,-25:,:])  # Shape: (B, T, vocab_size)
 
                 probs_hat = F.softmax(logits_hat, dim=-1)  # Convert to probabilities
 
