@@ -556,7 +556,7 @@ class GPT(nn.Module):
         pos2_emb = self.transformer.wpe(pos2)
         phase_emb = self.transformer.wph(phase) # position embeddings of shape (t, n_embd)
         x = tok_emb + pos_emb #+ phase_emb
-        x2 = tok_emb + pos_emb2 
+        x2 = tok_emb + pos2_emb 
 
                 
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
