@@ -328,17 +328,7 @@ class CausalSelfAttention(nn.Module):
                         dropout_p=self.dropout if self.training else 0, is_causal=True)
             y = attn + attn_1 + attn_2 + attn_3
             y = y /4
-            # Create position tensor of shape (T, 1)
-            pos = torch.arange(T, device=q.device).float().unsqueeze(-1)  # (T, 1)
-            
-            # Compute absolute position bias with correct broadcasting
-            abs_pos_bias = torch.sin(pos / (10000 ** (torch.arange(C, device=q.device).float() / C)))  # (T, C)
-            
-            # Broadcast across batch
-            abs_pos_bias = abs_pos_bias.unsqueeze(0).expand(B, T, C)  # Shape (B, T, C)
-            
-            # Add it directly to `y` before projection
-            y = y + abs_pos_bias
+
 
                 
         else:
@@ -398,7 +388,16 @@ class Block(nn.Module):
             residual = x
             x = self.ln_1(x)
             x = self.attn(x, rope_freqs)
+            # --- Step 2: Compute Absolute Positional Bias ---
+            pos = torch.arange(x.shape[1], device=x.device).float().unsqueeze(-1)  # (T, 1)
+            abs_pos_bias = torch.sin(pos / (10000 ** (torch.arange(x.shape[2], device=x.device).float() / x.shape[2])))  # (T, C)
             
+            # Expand to match batch size
+            abs_pos_bias = abs_pos_bias.unsqueeze(0).expand(x.shape[0], -1, -1)  # (B, T, C)
+            
+            # Inject absolute position bias **before MLP**
+            x = x + abs_pos_bias  # Now position bias influences features
+
             # Apply normalization and MLP (using the residual)
             x = self.ln_2(x)
             x = self.mlp(x)
