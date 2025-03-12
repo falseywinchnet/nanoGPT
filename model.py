@@ -519,7 +519,7 @@ class GPT(nn.Module):
         self.h_safe= [torch.zeros(1, self.cond_vrnn.h_dim) for _ in range(self.cond_vrnn.num_layers)]
 
         self.top_k = 5
-        self.steps = 5
+        self.steps = 50
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # weight tying: share the weights between the token embedding and the final output layer.
         self.transformer.wte.weight = self.lm_head.weight
