@@ -232,6 +232,7 @@ class CausalSelfAttention(nn.Module):
 
         # Output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.abs_pos_embedding = nn.Parameter(torch.zeros(1, config.n_head, config.block_size, config.block_size))
 
         # Dropouts
         self.attn_dropout = nn.Dropout(config.dropout)
@@ -313,6 +314,8 @@ class CausalSelfAttention(nn.Module):
             k1, q1 = self.apply_rope(k1, q1)
             k2, q2 = self.apply_rope_reversed(k2, q2)
             q3, k3 = self.apply_rope_reversed(q3, k3)
+        pos_emb = torch.sin(pos.view(1, 1, T, 1) / 10000 ** (torch.arange(self.n_embd // self.n_head, device=q.device).float() / (self.n_embd // self.n_head)))
+        abs_pos_bias = pos_emb.repeat(B, self.n_head, 1, T)  # (B, num_heads, T, T)
 
                 
         # Compute attention for the primary embedding
@@ -327,6 +330,7 @@ class CausalSelfAttention(nn.Module):
                         dropout_p=self.dropout if self.training else 0, is_causal=True)
             y = attn + attn_1 + attn_2 + attn_3
             y = y /4
+            y = y + abs_pos_bias
                 
         else:
             print("Nope not today!")
@@ -552,24 +556,15 @@ class GPT(nn.Module):
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
         phase = compute_phase_embedding(tok_emb)
-
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        with torch.no_grad():
-              pos2_emb = self.transformer.wpe(pos2)  # Reversed order (fixed, non-trainable)
         phase_emb = self.transformer.wph(phase) # position embeddings of shape (t, n_embd)
-        x = tok_emb + pos_emb #+ phase_emb
-        x2 = tok_emb + pos2_emb 
-
+        x = tok_emb #+ phase_emb
                 
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
         x = x * dropout_mask  
-        x2 = x2 * dropout_mask  
 
         # Pass through each block
         for i, block in enumerate(self.transformer.residual):
             x = block(x, rope_freqs=self.rope_freqs)   
-            x2 = block(x2, rope_freqs=self.rope_freqs)   
-        x = x*0.5 + x2*0.5
         # Final layernorm
         x = self.transformer.ln_f(x)
         return x
