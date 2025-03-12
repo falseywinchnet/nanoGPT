@@ -510,6 +510,7 @@ class GPT(nn.Module):
         """
         b, t = idx.shape
         device = idx.device
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
