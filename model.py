@@ -603,14 +603,10 @@ class GPT(nn.Module):
         # ---- Normal single forward pass for the given sequence ----
         x,v_loss = self._run_transformer(idx)  # shape (b, t, n_embd)
         
-        if return_features:
-            # If we want the final hidden states:
-            return x  # shape (b, t, n_embd)
-        else:
             # otherwise, return last-position logits by default:
-            logits = self.lm_head(x[:, -1:, :])  # (b, 1, vocab_size)
-            loss = None
-            if targets is not None:
+        logits = self.lm_head(x[:, -1:, :])  # (b, 1, vocab_size)
+        loss = None
+        if targets is not None:
                 # compute CE across entire seq
                 full_logits = self.lm_head(x)      # (b, t, vocab_size)
                 loss = F.cross_entropy(
@@ -620,7 +616,7 @@ class GPT(nn.Module):
                 )
                 lambda_vrnn = 0.1  # Hyperparameter to weigh the VRNN loss.
                 loss = loss + lambda_vrnn * v_loss
-            return logits, loss
+                return logits, loss
 
 
     def _run_transformer(self, idx):
