@@ -653,9 +653,14 @@ class GPT(nn.Module):
         with torch.no_grad():
 
             pred= auto_regressive_predict_q(x[:, -1, :],self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
-                    # Convert x_hat into token logits and get predictions
+            print("pred shape:", pred.shape)  # Should be (B, T, c)
+
             logits_hat = self.lm_head(pred)  # Shape: (B, T, vocab_size)
+            print("logits_hat shape:", logits_hat.shape)  # Should be (B, T, c)
+
             probs_hat = F.softmax(logits_hat, dim=-1)  # Convert to probabilities
+            print("probs_hat shape:", probs_hat.shape)  # Should be (B, T)
+
             pred_tokens = torch.multinomial(probs_hat.view(-1, probs_hat.size(-1)), num_samples=1).view(x_hat.shape[:-1]) 
             print("VRNN predicted sequence:", pred_tokens[0])  # Print first sequence in batch
 
