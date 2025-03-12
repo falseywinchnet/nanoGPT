@@ -570,6 +570,7 @@ class GPT(nn.Module):
     def forward(
         self,
         idx,
+        targets=None,
         decode=None      
     ):
         """
