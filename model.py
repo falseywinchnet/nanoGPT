@@ -594,8 +594,6 @@ class GPT(nn.Module):
           hard_st: if True, use straight-through gumbel
           return_features: override config.return_features if set
         """
-        if return_features is None:
-            return_features = self.config.return_features
 
         device = idx.device
         b, original_t = idx.shape
