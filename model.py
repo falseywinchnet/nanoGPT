@@ -645,19 +645,36 @@ class GPT(nn.Module):
             x_hat, h, z = self.cond_vrnn(x[:, max(0,t-25):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
             
         with torch.no_grad():
+                # Start with the last 25 tokens as context
+                context = x  # (B, 25, embedding_dim)
+                h_new = h  # Maintain hidden state across iterations
+            
+                # Initialize empty list to store new embeddings
+                generated_embeddings = []
+            
+                # Sequentially generate 25 steps, feeding back each step
+                for _ in range(25):
+                    # Get the last generated token embedding (or context if first step)
+                    last_token = x[:, -1:, :]  # (B, 1, embedding_dim)
+            
+                    # Predict the next token embedding
+                    pred_embedding, h_new, _ = self.cond_vrnn(last_token, h_new)  # (B, 1, embedding_dim)
+            
+                    # Append to the generated sequence
+                    generated_embeddings.append(pred_embedding)
+            
+                    # Update context: shift left and append new token
+                    x = torch.cat([context[:, 1:, :], pred_embedding], dim=1)
 
-            pred= auto_regressive_predict_q(x[:, -1, :],self.cond_vrnn, h, steps=self.steps, top_k=self.top_k)
+                logits_hat = self.lm_head(generated_embeddings)  # Shape: (B, T, vocab_size)
 
-            logits_hat = self.lm_head(pred)  # Shape: (B, T, vocab_size)
+                probs_hat = F.softmax(logits_hat, dim=-1)  # Convert to probabilities
 
-            probs_hat = F.softmax(logits_hat, dim=-1)  # Convert to probabilities
-
-            pred_tokens = torch.multinomial(probs_hat.view(-1, probs_hat.size(-1)), num_samples=1)
-            pred_tokens = pred_tokens.view(probs_hat.shape[:-1])  # Reshape correctly to (B, T)
-            if decode is not None:
+                pred_tokens = torch.multinomial(probs_hat.view(-1, probs_hat.size(-1)), num_samples=1)
+                pred_tokens = pred_tokens.view(probs_hat.shape[:-1])  # Reshape correctly to (B, T)
+                if decode is not None:
                         print("VRNN PREDICTION: ",decode(pred_tokens[0].tolist()))
 
-        x = torch.cat([x, pred], dim=1)   # (B, T+steps, C)
                 
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
         x = x * dropout_mask  
