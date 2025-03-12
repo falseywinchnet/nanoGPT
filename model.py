@@ -89,247 +89,125 @@ class LayerNorm(nn.Module):
 
 
 
-
 class CustomVRNNCell(nn.Module):
     def __init__(self, x_dim, h_dim, z_dim):
-        """
-        x_dim: Input embedding dimension (same as Transformer hidden size)
-        h_dim: Hidden state size
-        z_dim: Latent variable dimension
-        """
         super().__init__()
         self.x_dim = x_dim
         self.h_dim = h_dim
         self.z_dim = z_dim
 
-        # Encoder: Produces latent representation z from input and previous state
-        # Inference network: q(z_t | x_t, h_{t-1})
+        # The encoder now outputs 2*z_dim values (mean and log variance).
         self.enc_net = nn.Sequential(
             nn.Linear(x_dim + h_dim, 2 * z_dim),
             nn.Tanh(),
-            nn.Linear(2 * z_dim, z_dim)
+            nn.Linear(2 * z_dim, 2 * z_dim)  # Note: outputs 2*z_dim values
         )
         
-        # Decoder: Reconstructs input x from latent z and hidden state
+        # The decoder remains similar.
         self.dec_net = nn.Sequential(
             nn.Linear(z_dim + h_dim, 2 * x_dim),
             nn.Tanh(),
             nn.Linear(2 * x_dim, x_dim)
         )
 
+        # Prior network now outputs conditional prior parameters.
         self.prior_net = nn.Sequential(
             nn.Linear(h_dim, 2 * z_dim),
             nn.Tanh(),
             nn.Linear(2 * z_dim, 2 * z_dim)
         )
-        # Custom state transition (instead of GRU)
+        
+        # Use a GRU cell for hidden state updates.
         self.trans_net = nn.GRUCell(x_dim + z_dim, h_dim)
-
-        # Activation function
         self.activation = nn.GELU()
 
     def forward(self, x, h_prev):
-        """
-        Args:
-            x: (B, x_dim) – Current input embedding.
-            h_prev: (B, h_dim) – Previous hidden state.
-
-        Returns:
-            x_hat: (B, x_dim) – Reconstructed x.
-            h_new: (B, h_dim) – Updated hidden state.
-            z: (B, z_dim) – Sampled latent representation.
-        """
-        # Encode input and previous state into latent z
+        # --- Encoder: Get latent variable parameters ---
         enc_input = torch.cat([x, h_prev], dim=-1)
-        z = self.enc_net(enc_input)
+        enc_out = self.enc_net(enc_input)
+        # Split into mean and log variance for the latent distribution
+        mu_post, logvar_post = enc_out.chunk(2, dim=-1)
+        std_post = torch.exp(0.5 * logvar_post)
+        # Sample a latent variable using the reparameterization trick
+        eps = torch.randn_like(std_post)
+        z = mu_post + std_post * eps
 
-        # Prior from h_prev
+        # --- Prior: Get expected latent parameters from previous hidden state ---
         prior_out = self.prior_net(h_prev)
-        mu_prior, log_sigma_prior = prior_out.chunk(2, dim=-1)
-        sigma_prior = torch.exp(log_sigma_prior)
+        mu_prior, logvar_prior = prior_out.chunk(2, dim=-1)
 
-        # Decode latent z and hidden state to reconstruct x_hat
+        # --- Compute KL Divergence ---
+        # This measures the “surprise” or difference between what we predicted and what we expected.
+        kl = 0.5 * torch.sum(
+            torch.exp(logvar_post - logvar_prior) + ((mu_post - mu_prior) ** 2) / torch.exp(logvar_prior)
+            - 1 + logvar_prior - logvar_post, dim=-1
+        )
+
+        # --- Decoder: Generate a reconstruction of the input ---
         dec_input = torch.cat([z, h_prev], dim=-1)
         x_hat = self.dec_net(dec_input)
 
-        # Custom state transition (Instead of GRU)
+        # --- Update Hidden State: Include the latent variable ---
         trans_input = torch.cat([x, z], dim=-1)
         h_new = self.activation(self.trans_net(trans_input))
 
-        return x_hat, h_new, z
-
+        # Return the reconstructed x, updated hidden state, KL loss for this step, and z if needed.
+        return x_hat, h_new, kl, z
 
 class CustomVRNN(nn.Module):
     def __init__(self, seq_len, x_dim, h_dim, z_dim, num_layers=2):
-        """
-        Variational RNN model that operates as a predictive layer before attention.
-        
-        Args:
-            seq_len: Maximum sequence length.
-            x_dim: Transformer hidden size (input dimension).
-            h_dim: Hidden state size.
-            z_dim: Latent variable size.
-            num_layers: Number of stacked VRNN layers.
-        """
         super().__init__()
         self.seq_len = seq_len
         self.h_dim = h_dim
         self.z_dim = z_dim
         self.num_layers = num_layers
 
-        # Stacked VRNN cells
         self.vrnn_cells = nn.ModuleList([
             CustomVRNNCell(x_dim, h_dim, z_dim) 
-            for i in range(num_layers)
+            for _ in range(num_layers)
         ])
 
     def forward(self, x, h_prev=None):
-        """
-        Processes a batch of input embeddings through VRNN layers.
-        
-        Args:
-            x: (B, T, x_dim) – Input sequence embeddings.
-            h_prev: (List of tensors) – Previous hidden states for each layer.
-
-        Returns:
-            x_hat: (B, T, x_dim) – Reconstructed input.
-            h_new: List[(B, h_dim)] – Updated hidden states per layer.
-            z_seq: (B, T, z_dim) – Latent sequence.
-        """
         batch_size, seq_len, _ = x.shape
 
-        # Initialize hidden states if not provided
         if h_prev is None or h_prev[0].size(0) != batch_size:
-                h_prev = [torch.zeros(batch_size, self.h_dim, device=x.device) for _ in range(self.num_layers)]
+            h_prev = [torch.zeros(batch_size, self.h_dim, device=x.device)
+                      for _ in range(self.num_layers)]
 
-        x_hat_seq, new_h_states, z_seq = [], [], []
+        x_hat_seq, z_seq = [], []
+        total_kl = 0.0
 
-        for t in range(seq_len):  # Iterate through sequence
-            x_t = x[:, t, :]  # Get the t-th timestep embedding
-
+        for t in range(seq_len):
+            x_t = x[:, t, :]
+            kl_t = 0.0
             new_h = []
-
             for layer_idx, cell in enumerate(self.vrnn_cells):
-            
-                x_t, h_t, z_t = cell(x_t, h_prev[layer_idx])
-                new_h.append(h_t)  # Update hidden state
+                # Each cell now returns x_hat, new hidden state, KL loss, and z.
+                x_hat, h_t, kl_cell, z_t = cell(x_t, h_prev[layer_idx])
+                new_h.append(h_t)
+                kl_t += kl_cell  # accumulate KL loss from each layer
+                # Optionally, pass the reconstructed output to the next layer.
+                x_t = x_hat  
+            h_prev = new_h
+            x_hat_seq.append(x_hat)
+            z_seq.append(z_t)
+            total_kl += kl_t
 
-            h_prev = new_h  # Store updated hidden states
-            x_hat_seq.append(x_t)  # Store reconstructed x
-            z_seq.append(z_t)  # Store latent z
-
-        # Stack sequences back into (B, T, *)
+        # Stack the sequence outputs.
         x_hat_seq = torch.stack(x_hat_seq, dim=1)
         z_seq = torch.stack(z_seq, dim=1)
 
-        return x_hat_seq, new_h, z_seq[:, -1, :]  # Only take the last step’s latent and z.
+        # Compute a simple reconstruction loss (for example, mean-squared error).
+        recon_loss = F.mse_loss(x_hat_seq, x)
+        # Average the KL loss over the batch.
+        kl_loss = total_kl.mean()
+
+        # The overall loss is the sum of the reconstruction loss and the KL divergence.
+        total_loss = recon_loss + kl_loss
+
+        return total_loss, x_hat_seq, h_prev, z_seq[:, -1, :]
 
 
-
-from collections import deque
-import torch
-import torch.nn.functional as F
-
-def auto_regressive_predict_q(last_q, vrnn, h_init, steps, top_k=5, n_candidates=10, sigma=0.1):
-    """
-    Auto-regressive prediction in q-vector (transformer embedding) space.
-    
-    The VRNN decodes to a q-vector (the predicted embedding), and we assume that
-    this is the mean of a Gaussian distribution. At each step we sample candidate
-    q-vectors around that mean, compute their Gaussian log-probabilities (up to a constant),
-    select the top_k most probable candidates, and recursively feed them back into the model.
-    
-    Args:
-        last_q: Tensor of shape (B, x_dim) – last observed q-vector.
-        vrnn: A multi-layer VRNN model. Its attribute `vrnn_cells` is a list of cells.
-              Each cell takes an input q-vector and a hidden state and returns a tuple:
-                (x_hat, new_hidden, latent r-vector).
-              Here, x_hat is a q-vector prediction.
-        h_init: List of hidden state tensors (one per VRNN cell), each of shape (B, h_dim).
-        steps: Number of future time steps to predict.
-        top_k: Beam search branching factor (number of candidates to keep per branch per step).
-        n_candidates: Number of candidate samples to draw (per branch) before pruning.
-        sigma: Standard deviation used for sampling candidate q-vectors from the Gaussian
-               centered at the predicted q-vector.
-    
-    Returns:
-        pred_seq_tensor: Tensor of shape (B, steps, x_dim) – the predicted q-vector sequence
-                         from the best branch.
-        best_prob_history: List (length = steps) of tuples with candidate probability data at each step.
-                           Each tuple is (candidate_log_probs, candidate_indices) for that step.
-                           (This records the probability matrix before pruning at each step.)
-    """
-    B, x_dim = last_q.shape
-    device = last_q.device
-    
-    # Each beam branch is a tuple:
-    #   (pred_seq, h_list, cum_logp, last_q, prob_history)
-    # where:
-    #   pred_seq: list of predicted q-vectors (each: (B, x_dim))
-    #   h_list: list of hidden state tensors (one per VRNN layer)
-    #   cum_logp: cumulative log probability (Tensor of shape (B,))
-    #   last_q: current q-vector input for this branch (B, x_dim)
-    #   prob_history: list of candidate probability data for each step
-    beams = [( [], h_init, torch.zeros(B, device=device), last_q, [] )]
-    
-    for step in range(steps):
-        new_beams = []
-        # Expand every branch in the beam.
-        for branch in beams:
-            pred_seq, h_list, cum_logp, last_q, prob_history = branch
-            
-            # Run one forward step through all VRNN layers.
-            x_in = last_q
-            new_h_list = []
-            for cell, h in zip(vrnn.vrnn_cells, h_list):
-                # Each cell returns (x_hat, new_hidden, r-vector); we only need x_hat and new_hidden.
-                x_out, h_new, _ = cell(x_in, h)
-                new_h_list.append(h_new)
-                x_in = x_out
-            # x_in is the VRNN's decoded prediction (a q-vector), which we treat as the mean.
-            q_hat = x_in  # shape: (B, x_dim)
-            
-            # Sample n_candidates candidate q-vectors around q_hat.
-            # candidate_q shape: (B, n_candidates, x_dim)
-            candidate_q = q_hat.unsqueeze(1) + sigma * torch.randn(B, n_candidates, x_dim, device=device)
-            
-            # Compute (unnormalized) log probability for each candidate under N(q_hat, sigma^2 I).
-            # (Ignoring constant terms, the log probability is proportional to -||candidate - q_hat||^2.)
-            candidate_log_prob = -0.5 * torch.sum(((candidate_q - q_hat.unsqueeze(1)) / sigma)**2, dim=-1)  # (B, n_candidates)
-            
-            # Select the top_k candidates for each branch.
-            topk_vals, topk_idx = candidate_log_prob.topk(k=top_k, dim=1)  # each: (B, top_k)
-            # Gather the corresponding candidate q-vectors.
-            # Expand topk_idx to match candidate_q's last dimension.
-            candidate_q_topk = torch.gather(candidate_q, 1, topk_idx.unsqueeze(-1).expand(-1, -1, x_dim))  # (B, top_k, x_dim)
-            
-            # For each candidate in the top_k, create a new branch.
-            for i in range(top_k):
-                # Extract the candidate q-vector and its log probability.
-                candidate = candidate_q_topk[:, i, :]          # (B, x_dim)
-                candidate_logp = topk_vals[:, i]                 # (B,)
-                
-                new_pred_seq = pred_seq + [candidate]            # Append candidate to branch's sequence.
-                new_cum_logp = cum_logp + candidate_logp         # Update cumulative log probability.
-                # Append the candidate probability distribution data for this step.
-                new_prob_history = prob_history + [(topk_vals, topk_idx)]
-                
-                # Create new branch with updated hidden states and candidate as new last_q.
-                new_branch = (new_pred_seq, new_h_list, new_cum_logp, candidate, new_prob_history)
-                new_beams.append(new_branch)
-        
-        # Prune: sort all new branches by the average cumulative log probability and keep the top_k overall.
-        new_beams = sorted(new_beams, key=lambda b: b[2].mean().item(), reverse=True)[:top_k]
-        beams = new_beams
-    
-    # After all steps, select the best branch.
-    best_branch = beams[0]
-    best_pred_seq, best_h, best_cum_logp, best_last_q, best_prob_history = best_branch
-    
-    # Stack the predicted q-vectors into a tensor of shape (B, steps, x_dim).
-    pred_seq_tensor = torch.stack(best_pred_seq, dim=1)
-    
-    return pred_seq_tensor
 
 
             
@@ -643,11 +521,11 @@ class GPT(nn.Module):
         
         if torch.is_grad_enabled():
            h = None #reset anew
-           x_hat, h, z = self.cond_vrnn(x[:, max(0,t-64):, :], h)  # Pass batch through VRNN
+           kl_loss, x_hat, h, z = self.cond_vrnn(x[:, max(0,t-64):, :], h)  # Pass batch through VRNN
 
         else:
             h = [h.to(x.device) for h in self.h_safe]  # Ensure h_safe is on the same device as x 
-            x_hat, h, z = self.cond_vrnn(x[:, -1, :].unsqueeze(1) , h)  
+            kl_loss, x_hat, h, z = self.cond_vrnn(x[:, -1, :].unsqueeze(1) , h)  
             h.safe = h
                     
         with torch.no_grad():
@@ -660,7 +538,7 @@ class GPT(nn.Module):
                     # Get the first generated new token embedding (or context if first step)
 
                     # Predict the next token embedding
-                    pred_embedding, h_new, _ = self.cond_vrnn(pred_embedding, h_new)  # (B, 1, embedding_dim)
+                    _, pred_embedding, h_new, _ = self.cond_vrnn(pred_embedding, h_new)  # (B, 1, embedding_dim)
             
                     # Append to the generated sequence
             
@@ -681,7 +559,7 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
         x = x[:,:t,:]
         z_prime = x[:, -x_hat.shape[1]+1:, :]  # for example
-        vrnn_loss = F.mse_loss(x_hat[:, :-1, :], z_prime)
+        vrnn_loss = F.mse_loss(x_hat[:, :-1, :], z_prime) + kl_loss
         return x,vrnn_loss
     
         
