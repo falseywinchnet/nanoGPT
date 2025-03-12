@@ -669,14 +669,7 @@ class GPT(nn.Module):
                     # Update context: shift left and append new token
                     x = torch.cat([context[:, 1:, :], pred_embedding], dim=1)
 
-                logits_hat = self.lm_head(x[:,-25:,:])  # Shape: (B, T, vocab_size)
-
-                probs_hat = F.softmax(logits_hat, dim=-1)  # Convert to probabilities
-
-                pred_tokens = torch.multinomial(probs_hat.view(-1, probs_hat.size(-1)), num_samples=1)
-                pred_tokens = pred_tokens.view(probs_hat.shape[:-1])  # Reshape correctly to (B, T)
-                if decode is not None:
-                        print("VRNN PREDICTION: ",decode(pred_tokens[0].tolist()))
+               
 
                 
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
