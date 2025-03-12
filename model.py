@@ -660,8 +660,7 @@ class GPT(nn.Module):
 
             pred_tokens = torch.multinomial(probs_hat.view(-1, probs_hat.size(-1)), num_samples=1)
             pred_tokens = pred_tokens.view(probs_hat.shape[:-1])  # Reshape correctly to (B, T)
-            print("VRNN predicted sequence:", pred_tokens[0])  # Print first sequence in batch
-
+            print("VRNN PREDICTION: ",decode(pred_tokens[0].tolist()))
 
         x = torch.cat([x, pred], dim=1)   # (B, T+steps, C)
                 
