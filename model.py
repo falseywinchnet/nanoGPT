@@ -659,15 +659,15 @@ class GPT(nn.Module):
                 # Sequentially generate 25 steps, feeding back each step
                 for _ in range(25):
                     # Get the last generated token embedding (or context if first step)
-                    last_token = x[:, -1:, :]  # (B, 1, embedding_dim)
+                    pred_embedding = x_hat[:, -1:, :]  # (B, 1, embedding_dim)
             
                     # Predict the next token embedding
-                    pred_embedding, h_new, _ = self.cond_vrnn(last_token, h_new)  # (B, 1, embedding_dim)
+                    pred_embedding, h_new, _ = self.cond_vrnn(pred_embedding, h_new)  # (B, 1, embedding_dim)
             
                     # Append to the generated sequence
             
                     # Update context: shift left and append new token
-                    x = torch.cat([context[:, 1:, :], pred_embedding], dim=1)
+                    x = torch.cat([x, pred_embedding], dim=1)
 
                
 
@@ -683,10 +683,7 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
         x = x[:,:t,:]
         z_prime = x[:, -x_hat.shape[1]:, :]  # for example
-        lambda_mse = 0.5
-        lambda_cos = 0.5 #heca8se we want patterns
-        vrnn_loss = lambda_mse * F.mse_loss(x_hat, z_prime) + lambda_cos * (1 - F.cosine_similarity(x_hat, z_prime, dim=-1).mean())
-                
+        vrnn_loss =  F.mse_loss(x_hat, z_prime) 
         return x,vrnn_loss
     
         
