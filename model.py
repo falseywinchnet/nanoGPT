@@ -570,8 +570,7 @@ class GPT(nn.Module):
     def forward(
         self,
         idx,
-        targets=None,
-        return_features=None
+        decode=None      
     ):
         """
         A single forward method that:
@@ -660,7 +659,8 @@ class GPT(nn.Module):
 
             pred_tokens = torch.multinomial(probs_hat.view(-1, probs_hat.size(-1)), num_samples=1)
             pred_tokens = pred_tokens.view(probs_hat.shape[:-1])  # Reshape correctly to (B, T)
-            print("VRNN PREDICTION: ",decode(pred_tokens[0].tolist()))
+            if decode not None:
+                        print("VRNN PREDICTION: ",decode(pred_tokens[0].tolist()))
 
         x = torch.cat([x, pred], dim=1)   # (B, T+steps, C)
                 
