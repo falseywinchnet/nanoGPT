@@ -328,12 +328,18 @@ class CausalSelfAttention(nn.Module):
                         dropout_p=self.dropout if self.training else 0, is_causal=True)
             y = attn + attn_1 + attn_2 + attn_3
             y = y /4
-            pos = torch.arange(T, device=q.device).float()
-            abs_pos_bias = torch.sin(pos / 10000 ** (torch.arange(C, device=q.device).float() / C))  # (T, C)
-
-            # Broadcast it across batch and heads
+            # Create position tensor of shape (T, 1)
+            pos = torch.arange(T, device=q.device).float().unsqueeze(-1)  # (T, 1)
+            
+            # Compute absolute position bias with correct broadcasting
+            abs_pos_bias = torch.sin(pos / (10000 ** (torch.arange(C, device=q.device).float() / C)))  # (T, C)
+            
+            # Broadcast across batch
             abs_pos_bias = abs_pos_bias.unsqueeze(0).expand(B, T, C)  # Shape (B, T, C)
+            
+            # Add it directly to `y` before projection
             y = y + abs_pos_bias
+
                 
         else:
             print("Nope not today!")
