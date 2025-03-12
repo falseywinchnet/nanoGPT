@@ -325,7 +325,7 @@ class CausalSelfAttention(nn.Module):
                         dropout_p=self.dropout if self.training else 0, is_causal=True)
             attn_3 = F.scaled_dot_product_attention(q3, k3, v3, attn_mask=None,
                         dropout_p=self.dropout if self.training else 0, is_causal=True)
-            y = attn1 + attn2 + attn3 + attn4
+            y = attn + attn_1 + attn_2 + attn_3
             y = y /4
                 
         else:
