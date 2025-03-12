@@ -528,7 +528,6 @@ class GPT(nn.Module):
             h = [h.to(x.device) for h in self.h_safe]  # Ensure h_safe is on the same device as x 
             kl_loss, x_hat, h, z = self.cond_vrnn(x[:, -1, :].unsqueeze(1) , h)  
             self.h_safe = h #save the re-occurent state
-        print(x_hat.shape)
         with torch.no_grad():
                 # Start with the first generated token as context
                 h_new = h  # Maintain hidden state across iterations
