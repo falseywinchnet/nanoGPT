@@ -512,9 +512,9 @@ class GPT(nn.Module):
         self.cond_vrnn = CustomVRNN(
                 seq_len=25,
                 x_dim=config.n_embd,
-                h_dim=8,
+                h_dim=32,
                 z_dim=config.n_embd,
-                num_layers=2
+                num_layers=4
         )
         self.h_safe= [torch.zeros(1, self.cond_vrnn.h_dim) for _ in range(self.cond_vrnn.num_layers)]
 
@@ -644,23 +644,21 @@ class GPT(nn.Module):
         
         if torch.is_grad_enabled():
            h = None #reset anew
-           x_hat, h, z = self.cond_vrnn(x[:, max(0,t-25):, :], h)  # Pass batch through VRNN
+           x_hat, h, z = self.cond_vrnn(x[:, max(0,t-50):, :], h)  # Pass batch through VRNN
 
         else:
             h = [h.to(x.device) for h in self.h_safe]  # Ensure h_safe is on the same device as x 
-            x_hat, h, z = self.cond_vrnn(x[:, max(0,t-25):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
+            x_hat, h, z = self.cond_vrnn(x[:, max(0,t-50):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
             
         with torch.no_grad():
                 # Start with the last 25 tokens as context
-                context = x  # (B, 25, embedding_dim)
                 h_new = h  # Maintain hidden state across iterations
-            
-            
-                # Sequentially generate 25 steps, feeding back each step
-                for _ in range(25):
-                    # Get the last generated token embedding (or context if first step)
-                    pred_embedding = x_hat[:, -1:, :]  # (B, 1, embedding_dim)
-            
+                pred_embedding = x_hat[:, -1, :]  # (B, 1, embedding_dim)
+                x = torch.cat([x, pred_embedding], dim=1)
+                # Sequentially generate 100 steps, feeding back each step
+                for _ in range(100):
+                    # Get the first generated new token embedding (or context if first step)
+
                     # Predict the next token embedding
                     pred_embedding, h_new, _ = self.cond_vrnn(pred_embedding, h_new)  # (B, 1, embedding_dim)
             
