@@ -554,7 +554,8 @@ class GPT(nn.Module):
         phase = compute_phase_embedding(tok_emb)
 
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        pos2_emb = self.transformer.wpe(pos2)
+        with torch.no_grad():
+              pos2_emb = self.transformer.wpe(pos2)  # Reversed order (fixed, non-trainable)
         phase_emb = self.transformer.wph(phase) # position embeddings of shape (t, n_embd)
         x = tok_emb + pos_emb #+ phase_emb
         x2 = tok_emb + pos2_emb 
