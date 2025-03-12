@@ -527,7 +527,7 @@ class GPT(nn.Module):
         else:
             h = [h.to(x.device) for h in self.h_safe]  # Ensure h_safe is on the same device as x 
             kl_loss, x_hat, h, z = self.cond_vrnn(x[:, -1, :].unsqueeze(1) , h)  
-            h.safe = h
+            self.h_safe = h #save the re-occurent state
                     
         with torch.no_grad():
                 # Start with the first generated token as context
