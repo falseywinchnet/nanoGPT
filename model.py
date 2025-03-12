@@ -632,7 +632,6 @@ class GPT(nn.Module):
         """
         b, t = idx.shape
         device = idx.device
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
@@ -644,19 +643,20 @@ class GPT(nn.Module):
         
         if torch.is_grad_enabled():
            h = None #reset anew
-           x_hat, h, z = self.cond_vrnn(x[:, max(0,t-50):, :], h)  # Pass batch through VRNN
+           x_hat, h, z = self.cond_vrnn(x[:, max(0,t-64):, :], h)  # Pass batch through VRNN
 
         else:
             h = [h.to(x.device) for h in self.h_safe]  # Ensure h_safe is on the same device as x 
-            x_hat, h, z = self.cond_vrnn(x[:, max(0,t-50):, :] , h)  # Pass last items through VRNN because VRNN PAPER SAYS SO
-            
+            x_hat, h, z = self.cond_vrnn(x[:, -1, :].unsqueeze(1) , h)  
+            h.safe = h
+                    
         with torch.no_grad():
-                # Start with the last 25 tokens as context
+                # Start with the first generated token as context
                 h_new = h  # Maintain hidden state across iterations
                 pred_embedding = x_hat[:, -1, :].unsqueeze(1)  # (B, 1, embedding_dim)
                 x = torch.cat([x, pred_embedding], dim=1)
                 # Sequentially generate 100 steps, feeding back each step
-                for _ in range(100):
+                for _ in range(128):
                     # Get the first generated new token embedding (or context if first step)
 
                     # Predict the next token embedding
