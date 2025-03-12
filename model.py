@@ -514,7 +514,7 @@ class GPT(nn.Module):
                 x_dim=config.n_embd,
                 h_dim=32,
                 z_dim=config.n_embd,
-                num_layers=4
+                num_layers=3
         )
         self.h_safe= [torch.zeros(1, self.cond_vrnn.h_dim) for _ in range(self.cond_vrnn.num_layers)]
 
@@ -655,8 +655,8 @@ class GPT(nn.Module):
                 h_new = h  # Maintain hidden state across iterations
                 pred_embedding = x_hat[:, -1, :].unsqueeze(1)  # (B, 1, embedding_dim)
                 x = torch.cat([x, pred_embedding], dim=1)
-                # Sequentially generate 100 steps, feeding back each step
-                for _ in range(128):
+                # Sequentially generate 64 steps, feeding back each step
+                for _ in range(64):
                     # Get the first generated new token embedding (or context if first step)
 
                     # Predict the next token embedding
