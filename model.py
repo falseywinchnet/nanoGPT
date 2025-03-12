@@ -316,7 +316,9 @@ class CausalSelfAttention(nn.Module):
             q3, k3 = self.apply_rope_reversed(q3, k3)
         pos = torch.arange(T, device=q.device).float()
         pos_emb = torch.sin(pos.view(1, 1, T, 1) / 10000 ** (torch.arange(self.n_embd // self.n_head, device=q.device).float() / (self.n_embd // self.n_head)))
-        abs_pos_bias = pos_emb.repeat(B, self.n_head, 1, T)  # (B, num_heads, T, T)
+        pos_emb = pos_emb.expand(B, self.n_head, T, T)  # Now matches attention output shape
+        abs_pos_bias = pos_emb
+
 
                 
         # Compute attention for the primary embedding
