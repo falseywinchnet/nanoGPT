@@ -286,6 +286,7 @@ class CausalSelfAttention(nn.Module):
         x:  (B, T, C) primary embeddings
         x2: (B, T, C) secondary embeddings (if any)
         """        
+        B, T, C = x.size()
 
         # ---- Primary pass Q,K,V ----
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
