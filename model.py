@@ -547,7 +547,7 @@ class GPT(nn.Module):
         b, t = idx.shape
         device = idx.device
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
-        pos2 = pos[::-1]
+        pos2 = torch.flip(pos, dims=[0])
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
         phase = compute_phase_embedding(tok_emb)
