@@ -653,8 +653,7 @@ class GPT(nn.Module):
         with torch.no_grad():
                 # Start with the last 25 tokens as context
                 h_new = h  # Maintain hidden state across iterations
-                pred_embedding = x_hat[:, -1, :]  # (B, 1, embedding_dim)
-                print(x.shape,pred_embedding.shape)
+                pred_embedding = x_hat[:, -1, :].unsqueeze(1)  # (B, 1, embedding_dim)
                 x = torch.cat([x, pred_embedding], dim=1)
                 # Sequentially generate 100 steps, feeding back each step
                 for _ in range(100):
