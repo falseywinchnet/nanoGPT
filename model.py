@@ -599,7 +599,7 @@ class GPT(nn.Module):
         b, original_t = idx.shape
 
         # ---- Normal single forward pass for the given sequence ----
-        x,v_loss = self._run_transformer(idx)  # shape (b, t, n_embd)
+        x,v_loss = self._run_transformer(idx,decode)  # shape (b, t, n_embd)
         
             # otherwise, return last-position logits by default:
         logits = self.lm_head(x[:, -1:, :])  # (b, 1, vocab_size)
@@ -617,7 +617,7 @@ class GPT(nn.Module):
                 return logits, loss
 
 
-    def _run_transformer(self, idx):
+    def _run_transformer(self, idx,decode):
         """
         1) Convert idx -> embeddings
         2) If override_last_embed is not None, replace the last token's embedding
