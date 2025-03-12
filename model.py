@@ -314,10 +314,19 @@ class CausalSelfAttention(nn.Module):
             k1, q1 = self.apply_rope(k1, q1)
             k2, q2 = self.apply_rope_reversed(k2, q2)
             q3, k3 = self.apply_rope_reversed(q3, k3)
-        pos = torch.arange(T, device=q.device).float()
-        pos_emb = torch.sin(pos.view(1, 1, T, 1) / 10000 ** (torch.arange(self.n_embd // self.n_head, device=q.device).float() / (self.n_embd // self.n_head)))
-        pos_emb = pos_emb.expand(B, self.n_head, T, T)  # Now matches attention output shape
-        abs_pos_bias = pos_emb
+            # Generate fixed absolute position embeddings
+            pos = torch.arange(T, device=q.device).float().unsqueeze(0).unsqueeze(0)  # (1, 1, T)
+            dim_term = torch.arange(self.n_embd // self.n_head, device=q.device).float().unsqueeze(0).unsqueeze(0).unsqueeze(0)  # (1, 1, 1, D)
+            
+            # Compute positional encoding
+            pos_emb = torch.sin(pos.unsqueeze(-1) / (10000 ** (dim_term / (self.n_embd // self.n_head))))  # Shape: (1, 1, T, D)
+            
+            # Reshape to (1, num_heads, T, T) by summing along embedding dimension
+            pos_emb = pos_emb.mean(dim=-1, keepdim=True)  # (1, 1, T, 1)
+            pos_emb = pos_emb.expand(1, self.n_head, T, T)  # Expand to match attention shape
+            
+            # Broadcast over batch size
+            abs_pos_bias = pos_emb.expand(B, self.n_head, T, T)  # Final shape: (B, num_heads, T, T)
 
 
                 
