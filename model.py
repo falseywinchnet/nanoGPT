@@ -10,47 +10,64 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+class LayerNorm(nn.Module):
+    """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
 
-class DyT(nn.Module):
-    def __init__(self, num_features):
+    def __init__(self, ndim, bias):
         super().__init__()
-        self.alpha = nn.Parameter(torch.ones(1)*0.5)
-        self.weight = nn.Parameter(torch.ones(num_features))
-        self.bias = nn.Parameter(torch.zeros(num_features))
-    
-    def forward(self, x):
-        x = torch.tanh(self.alpha * x)
-        return x * self.weight + self.bias
+        self.weight = nn.Parameter(torch.ones(ndim))
+        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
 
-class NewAttentionBlock(nn.Module):
+    def forward(self, input):
+        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+            
+
+class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.emb_dim = config.n_embd
-        self.n_heads = config.n_head
-        self.dropout = nn.Dropout(config.dropout)
+        assert config.n_embd % config.n_head == 0
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        self.flash = hasattr(F, 'scaled_dot_product_attention')
+        self.use_rope = config.use_rope
+        self.noise_alpha = config.noise_alpha
         
-        # DyT normalization (replaces LayerNorm)
-        self.dyt = DyT(self.emb_dim)
-        self.dyt2 = DyT(self.emb_dim)
-        self.dyt3 = DyT(self.emb_dim)
 
-        
-        self.W_q = nn.Linear(self.emb_dim, self.emb_dim, bias=False)
-        self.W_k = nn.Linear(self.emb_dim, self.emb_dim, bias=False)
-        self.W_v = nn.Linear(self.emb_dim, self.emb_dim, bias=False)
-        
-        # Attention projection (applied after attention)
-        self.attn_projection = nn.Linear(self.emb_dim, self.emb_dim, bias=True)
-        
-        # Feedforward layers
-        self.expand = nn.Linear(self.emb_dim, 4 * self.emb_dim)
-        self.contract = nn.Linear(4 * self.emb_dim, self.emb_dim)
-        self.gelu = nn.GELU()
+        # ---- Primary Q,K,V ----
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
 
-    
+        # Output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.abs_pos_embedding = nn.Parameter(torch.zeros(1, config.n_head, config.block_size, config.block_size))
+
+        # Dropouts
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+        
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                        .view(1, 1, config.block_size, config.block_size))
+
+
+    def apply_rope(self, q, k):
+        """Applies RoPE to queries and keys."""
+        B, H, S, D = q.shape
+        rope_freqs = self.rope_freqs.to(q.device, q.dtype)
+        positions = torch.arange(S, device=q.device, dtype=q.dtype).unsqueeze(1)
+        theta = positions * rope_freqs.unsqueeze(0)  # shape [S, D/2]
+        sin_theta, cos_theta = theta.sin(), theta.cos()
+
+        sin_theta = sin_theta.expand(B, H, S, D // 2)
+        cos_theta = cos_theta.expand(B, H, S, D // 2)
+
+        q1, q2 = q[..., 0::2], q[..., 1::2]
+        k1, k2 = k[..., 0::2], k[..., 1::2]
+        q = torch.cat([q1*cos_theta - q2*sin_theta, q1*sin_theta + q2*cos_theta], dim=-1)
+        k = torch.cat([k1*cos_theta - k2*sin_theta, k1*sin_theta + k2*cos_theta], dim=-1)
+        return q, k
+        
     def compute_positional_scores(self, seq_len):
         """Creates a position-dependent bias matrix (T, T)"""
         position = torch.arange(seq_len, dtype=torch.float32).unsqueeze(0)  # (1, T)
@@ -60,65 +77,100 @@ class NewAttentionBlock(nn.Module):
         position_scores = -torch.abs(relative_position)  # Closer positions get higher scores
         return position_scores
         
-    def forward(self, x):
+    def forward(self, x, rope_freqs=None):
+        """
+        x:  (B, T, C) primary embeddings
+        x2: (B, T, C) secondary embeddings (if any)
+        """        
+        B, T, C = x.size()
 
-        prior = self.dyt3(x.clone())  # Shape: (B, T, C)
+        # ---- Primary pass Q,K,V ----
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
 
-        # Apply dropout (keeps shape unchanged)
-        x = self.dropout(x)  # (B, T, C)
-        
-        # Add block-specific positional embedding (broadcasts over batch and tokens)
-        
-        # Apply Dynamic Tanh normalization (DyT) → still (B, T, C)
-        x = self.dyt(x)
-        
-        # --- Whitening and Ordinary Attention ---
-        # Apply the whitening transform to decorrelate features.
-        # This aims to approximate the effect of a Mahalanobis measure.
-        
-        # Compute queries, keys, values.
-        Q = self.W_q(x)  # (B, T, C)
-        K = self.W_k(x)  # (B, T, C)
-        V = self.W_v(x)  # (B, T, C)
-        
-        # Compute standard scaled dot-product attention
-        content_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.emb_dim)  # (B, T, T)
-        
-        # Compute explicit position-dependent interaction (DIET's approach)
-        position_scores = self.compute_positional_scores(x.shape[1]).to(x.device)  # (T, T) fixed position bias
-        
-        # Combine both for final attention scores
-        attn_scores = content_scores + position_scores  # (B, T, T)
-        attn_weights = F.softmax(attn_scores, dim=-1)  # (B, T, T)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        
-        # Multiply attention weights by V to get attended output.
-        # The resulting shape remains (B, T, C)
-        attn_output = torch.matmul(attn_weights, V)
-        
-        # Project the attention output back into the embedding space.
-        attn_output = self.attn_projection(attn_output)  # (B, T, C)
-        
-        # Apply second DyT scaling.
-        x = self.dyt2(attn_output)  # (B, T, C)
-        
-        # --- Feedforward Transformation ---
-        # Expand → GELU → Contract: (B, T, C) -> (B, T, 4C) -> (B, T, 4C) -> (B, T, C)
-        x = self.expand(x)
-        x = self.gelu(x)
-        x = self.contract(x)
+        if self.use_rope and rope_freqs is not None:
+            self.rope_freqs = rope_freqs
+            q, k = self.apply_rope(q, k)
+
                 
-        # Residual addition: add the original input back.
-        posterior = x + prior  # (B, T, C)
-        
-        # --- Compute Divergence Loss (JS loss) ---
-        # We compute a symmetric KL divergence between the softmax-normalized prior and posterior.
-        m = 0.5 * (prior + posterior)
-        js_loss = 0.5 * (F.kl_div(prior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean') +
+        # Compute attention for the primary embedding
+        if self.flash:
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=None,
+                        dropout_p=self.dropout if self.training else 0, is_causal=True)
+                
+        else:
+            print("Nope not today!")
+            att_scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            position_scores = self.compute_positional_scores(x.shape[1]).to(x.device)  # (T, T) fixed position bias
+            attn_scores = content_scores + position_scores  # (B, T, T)
+
+            att_scores = att_scores.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+
+            att_probs = F.softmax(att_scores, dim=-1)
+            att_probs = self.attn_dropout(att_probs)
+            att_pos = att_probs @ v
+            y = att_pos 
+
+        # Reshape
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        # Output projection
+        y = self.resid_dropout(self.c_proj(y))
+        return y
+
+class RainstarActivation(nn.Module):
+    def __init__(self, gammaval=8):
+        super().__init__()
+        self.sil = nn.SiLU()
+    def forward(self, x):
+       neg =  self.sil(x) * (x*torch.sigmoid(x)) + x/(1+torch.abs(x))
+       pos =  x -  x/(1+torch.abs(x))
+       return (neg *torch.sigmoid(-x)) + (pos * torch.sigmoid(x)) +1
+
+class MLP(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.gelu    = RainstarActivation()
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=False) #KAN style
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_r = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttention(config)
+        self.mlp = MLP(config)
+    
+    def forward(self, x, rope_freqs, num_iterations=3):
+            """
+            Iteratively apply attention and MLP with residuals over multiple steps.
+            """
+            prior = x
+            x = self.ln_1(x)
+            x = self.attn(x, rope_freqs)
+            # --- Step 2: Compute Absolute Positional Bias ---
+            # Apply normalization and MLP (using the residual)
+            x = self.ln_2(x)
+            x = self.mlp(x)
+            posterior = x + prior
+            m = 0.5 * (prior + posterior)
+            js_loss = 0.5 * (F.kl_div(prior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean') +
                          F.kl_div(posterior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean'))
         
         return posterior, js_loss
-
     
 @dataclass
 class GPTConfig:
@@ -140,17 +192,26 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
+        self.ln_x = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_y = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_R = LayerNorm(config.n_embd, bias=config.bias)
+
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
-
-            residual = nn.ModuleList([NewAttentionBlock(config) for _ in range(config.n_layer)])
+            drop = nn.Dropout(config.dropout),
+            residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        
-
+     
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # weight tying: share the weights between the token embedding and the final output layer.
         self.transformer.wte.weight = self.lm_head.weight
+        if config.use_rope:
+            head_dim = config.n_embd // config.n_head
+            self.register_buffer("rope_freqs", self._build_rope_frequencies(head_dim))
+        else:
+            self.rope_freqs = None
 
         # init all weights
         self.apply(self._init_weights)
@@ -170,7 +231,16 @@ class GPT(nn.Module):
         params are actually used as weights in the final layer, so we include them.
         """
         n_params = sum(p.numel() for p in self.parameters())
+        if non_embedding:
+            n_params -= self.transformer.wpe.weight.numel()
         return n_params
+
+    def _build_rope_frequencies(self, head_dim):
+        # e.g. head_dim = 32
+        half_dim = head_dim // 2  # =16
+        return 1.0 / (
+            10000 ** (torch.arange(0, half_dim, dtype=torch.float32) / half_dim)
+        )
         
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -215,7 +285,7 @@ class GPT(nn.Module):
         b, original_t = idx.shape
 
         # ---- Normal single forward pass for the given sequence ----
-        x, kl_loss = self._run_transformer(idx)  # shape (b, t, n_embd)
+        x ,kl= self._run_transformer(idx)  # shape (b, t, n_embd)
         
         if return_features:
             # If we want the final hidden states:
@@ -232,7 +302,7 @@ class GPT(nn.Module):
                     targets.view(-1),
                     ignore_index=-1
                 )
-                loss = loss + kl_loss * 0.1
+                loss = loss  + 0.1 * kl
             return logits, loss
 
 
@@ -245,21 +315,22 @@ class GPT(nn.Module):
         """
         b, t = idx.shape
         device = idx.device
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
-
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-
-        x = tok_emb + pos_emb
-                 
-        total_kl_loss = 0.0
+        pos_emb = self.transformer.wpe(pos)
+        x = tok_emb +pos_emb
+                
+        dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
+        x = x * dropout_mask  
+        kls= 0.0
         # Pass through each block
         for i, block in enumerate(self.transformer.residual):
-            x, kl_loss = block(x)   
-            total_kl_loss += kl_loss
+            x,kl = block(x, rope_freqs=self.rope_freqs)   
+            kls += kl
         # Final layernorm
-        return x, total_kl_loss
+        x = self.transformer.ln_f(x)
+        return x, kls
     
         
     def crop_block_size(self, block_size):
