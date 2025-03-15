@@ -93,7 +93,7 @@ class CausalSelfAttention(nn.Module):
         return q, k
         
 
-    def forward(self, x, rope_freqs=None, custom_weight=None):
+    def forward(self, x, rope_freqs=None, weights=None):
 
 
         B, T, C = x.size()
@@ -171,7 +171,7 @@ class Block(nn.Module):
             """
             prior = x
             x = self.ln_1(x)
-            x = self.attn(x, rope_freqs,c)
+            x = self.attn(x, rope_freqs,weights=c)
             # --- Step 2: Compute Absolute Positional Bias ---
             # Apply normalization and MLP (using the residual)
             x = self.ln_2(x)
@@ -344,7 +344,7 @@ class GPT(nn.Module):
             else:
                 c = None
         
-            x = block(x, rope_freqs=self.rope_freqs,c)
+            x = block(x, rope_freqs=self.rope_freqs,c=c)
    
             
         # Final layernorm
