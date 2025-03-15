@@ -26,80 +26,89 @@ class DyT(nn.Module):
         return x * self.weight + self.bias
 
 class NewAttentionBlock(nn.Module):
-    def __init__(self,config):
+    def __init__(self, config):
         super().__init__()
         self.emb_dim = config.n_embd
         self.n_heads = config.n_head
         self.dropout = nn.Dropout(config.dropout)
         
-        # DyT normalization
+        # DyT normalization (replaces LayerNorm)
         self.dyt = DyT(self.emb_dim)
-
-        # Positional embedding (unique to each block)
+        
+        # Positional embedding unique to this block
         self.pos_embed = nn.Parameter(torch.randn(1, 1, self.emb_dim))
-
-        # Mahalanobis-based Attention
+        
+        # Add a whitening transform (learned linear transformation, no bias)
+        self.whiten = nn.Linear(self.emb_dim, self.emb_dim, bias=False)
+        # Initialize the whitening matrix to identity
+        nn.init.eye_(self.whiten.weight)
+        
+        # Attention projection (applied after attention)
         self.attn_projection = nn.Linear(self.emb_dim, self.emb_dim, bias=True)
-
+        
         # Feedforward layers
         self.expand = nn.Linear(self.emb_dim, 4 * self.emb_dim)
         self.contract = nn.Linear(4 * self.emb_dim, self.emb_dim)
         self.gelu = nn.GELU()
 
     def forward(self, x):
-        # Copy x as prior
-        prior = x.clone()
+        # Copy x as prior for the residual connection.
+        prior = x.clone()  # Shape: (B, T, C)
         
-        # Apply dropout
-        x = self.dropout(x)
+        # Apply dropout (keeps shape unchanged)
+        x = self.dropout(x)  # (B, T, C)
         
-        # Add block-specific positional embedding
-        x = x + self.pos_embed
+        # Add block-specific positional embedding (broadcasts over batch and tokens)
+        x = x + self.pos_embed  # (B, T, C)
         
-        # Apply Dynamic Tanh (DyT instead of normalization)
+        # Apply Dynamic Tanh normalization (DyT) → still (B, T, C)
         x = self.dyt(x)
-
-        # Step 1: Mean-center x to compute covariance
-        x_centered = x - x.mean(dim=1, keepdim=True)  # Shape: (B, T, C)
         
-        # Step 2: Compute batch-wise covariance approximation
-        cov_matrix = torch.matmul(x_centered.transpose(1, 2), x_centered) / (x.shape[1] - 1)  # (B, C, C)
+        # --- Whitening and Ordinary Attention ---
+        # Apply the whitening transform to decorrelate features.
+        # This aims to approximate the effect of a Mahalanobis measure.
+        whitened_x = self.whiten(x)  # (B, T, C)
         
-        # Step 3: Add identity matrix for numerical stability
-        eye = torch.eye(cov_matrix.shape[-1], device=x.device).expand_as(cov_matrix) * 1e-6
-        inv_cov_matrix = torch.inverse(cov_matrix + eye)  # Shape: (B, C, C)
+        # Compute queries, keys, values.
+        # Here we use the whitened representations for queries and keys,
+        # while using the original (or whitened) x for values.
+        Q = whitened_x  # (B, T, C)
+        K = whitened_x  # (B, T, C)
+        V = x         # (B, T, C) – you could also use whitened_x for V
         
-        # Step 4: Compute Mahalanobis distance for each token individually
-        diff = x - x.mean(dim=1, keepdim=True)  # Shape: (B, T, C) (centered per batch)
+        # Compute standard scaled dot-product attention.
+        # attn_scores: (B, T, T)
+        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.emb_dim)
+        attn_weights = F.softmax(attn_scores, dim=-1)  # (B, T, T)
         
-        # Efficient batch-wise Mahalanobis computation (token-wise, avoiding T×T expansion)
-        left = torch.matmul(diff, inv_cov_matrix)  # (B, T, C)
-        mahalanobis_scores = torch.sqrt(torch.sum(left * diff, dim=-1))  # (B, T)
-
-        # Convert Mahalanobis distance to attention weights
-        attn_weights = torch.exp(-mahalanobis_scores)
-        attn_probs = F.softmax(attn_weights, dim=-1)  # (B, T, T)
-        attn_output = self.attn_projection(torch.matmul(attn_probs, x))  # Ensure (B, T, C)
-            
-
-
-        # Apply second DyT scaling
-        x = self.dyt(attn_output)
-
-        # Apply feedforward expansion
+        # Multiply attention weights by V to get attended output.
+        # The resulting shape remains (B, T, C)
+        attn_output = torch.matmul(attn_weights, V)
+        
+        # Project the attention output back into the embedding space.
+        attn_output = self.attn_projection(attn_output)  # (B, T, C)
+        
+        # Apply second DyT scaling.
+        x = self.dyt(attn_output)  # (B, T, C)
+        
+        # --- Feedforward Transformation ---
+        # Expand → GELU → Contract: (B, T, C) -> (B, T, 4C) -> (B, T, 4C) -> (B, T, C)
         x = self.expand(x)
         x = self.gelu(x)
         x = self.contract(x)
+        
+        # Ensure shape consistency for residual addition.
         assert x.shape == prior.shape, f"Shape mismatch: x={x.shape}, prior={prior.shape}"
-
-        # Add residual prior back
-        posterior = x + prior
-
-        # Compute JS Divergence between prior & posterior
+        
+        # Residual addition: add the original input back.
+        posterior = x + prior  # (B, T, C)
+        
+        # --- Compute Divergence Loss (JS loss) ---
+        # We compute a symmetric KL divergence between the softmax-normalized prior and posterior.
         m = 0.5 * (prior + posterior)
         js_loss = 0.5 * (F.kl_div(prior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean') +
                          F.kl_div(posterior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean'))
-
+        
         return posterior, js_loss
 
     
