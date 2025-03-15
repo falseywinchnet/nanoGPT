@@ -20,30 +20,6 @@ class LayerNorm(nn.Module):
 
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
-        
-class ConceptualInterpolator(nn.Module):
-    def __init__(self, n_embd):
-        super().__init__()
-        # Here, n_embd = d, the embedding dimension.
-        # The interpolator takes in each row of size 2d and outputs a row of size d.
-        self.interpolate = nn.Sequential(
-            nn.Linear(2 * n_embd, 5 * n_embd),  # Optionally expanding to a higher-dimensional space
-            nn.GELU(),
-            nn.Linear(5 * n_embd, n_embd)         # Compressing back to d
-        )
-
-    def forward(self, weight_prev, weight_next):
-        """
-        weight_prev: (3 * n_embd, n_embd)
-        weight_next: (3 * n_embd, n_embd)
-        """
-        # Concatenate along the last dimension:
-        # Each row becomes a vector of size (d + d) = 2d.
-        combined = torch.cat([weight_prev, weight_next], dim=-1)  # shape: (3 * n_embd, 2 * n_embd)
-        
-        # Apply the interpolation network row-wise
-        interpolated = self.interpolate(combined)  # shape: (3 * n_embd, n_embd)
-        return interpolated
 
 
 class CausalSelfAttention(nn.Module):
@@ -208,10 +184,6 @@ class GPT(nn.Module):
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            interpolators = nn.ModuleList([
-                ConceptualInterpolator(config.n_embd)  # size matches attn.c_attn.weight flattened
-                for _ in range(config.n_layer)
-            ]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
      
@@ -340,7 +312,8 @@ class GPT(nn.Module):
             if i > 0 and (i + 1) % 2 and i < len(self.transformer.residual) - 1:
                 weight_prev = self.transformer.residual[i - 1].attn.c_attn.weight
                 weight_next = self.transformer.residual[i + 1].attn.c_attn.weight
-                c = self.transformer.interpolators[i](weight_prev, weight_next)  
+                c = weight_prev + weight_next
+                c = c/2
             else:
                 c = None
         
