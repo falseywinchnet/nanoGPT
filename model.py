@@ -202,7 +202,7 @@ class GPT(nn.Module):
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            self.interpolators = nn.ModuleList([
+            interpolators = nn.ModuleList([
                 ConceptualInterpolator(config.n_embd * 3 * config.n_embd)  # size matches attn.c_attn.weight flattened
                 for _ in range(len(self.transformer.residual))
             ]),
@@ -334,7 +334,7 @@ class GPT(nn.Module):
             if i > 0 and (i + 1) % 2 and i < len(self.transformer.residual) - 1:
                 weight_prev = self.transformer.residual[i - 1].attn.c_attn.weight
                 weight_next = self.transformer.residual[i + 1].attn.c_attn.weight
-                interpolated_weight = self.interpolators[i](weight_prev, weight_next)        
+                interpolated_weight = self.transformer.interpolators[i](weight_prev, weight_next)        
                 block.attn.c_attn.weight.copy_(interpolated_weight)
         
             x = block(x, rope_freqs=self.rope_freqs)
