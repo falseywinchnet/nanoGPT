@@ -170,7 +170,7 @@ class Block(nn.Module):
             js_loss = 0.5 * (F.kl_div(prior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean') +
                          F.kl_div(posterior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean'))
         
-        return posterior, js_loss
+            return posterior, js_loss
     
 @dataclass
 class GPTConfig:
