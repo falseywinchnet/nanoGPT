@@ -344,8 +344,7 @@ class GPT(nn.Module):
                 weight_prev = self.transformer.residual[i - 1].attn.c_attn.weight
                 weight_next = self.transformer.residual[i + 1].attn.c_attn.weight
                 interpolated_weight = self.transformer.interpolators[i](weight_prev, weight_next)  
-                with torch.no_grad():
-                    block.attn.c_attn.weight.copy_(interpolated_weight)
+                block.attn.c_attn.weight.copy_(interpolated_weight)
         
             x = block(x, rope_freqs=self.rope_freqs)
    
