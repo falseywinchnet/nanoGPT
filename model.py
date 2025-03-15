@@ -52,15 +52,25 @@ class NewAttentionBlock(nn.Module):
         self.contract = nn.Linear(4 * self.emb_dim, self.emb_dim)
         self.gelu = nn.GELU()
 
-    def forward(self, x):
-        # Copy x as prior for the residual connection.
-        prior = self.dyt3(x.clone())  # Shape: (B, T, C)
+    
+    def compute_positional_scores(self, seq_len):
+        """Creates a position-dependent bias matrix (T, T)"""
+        position = torch.arange(seq_len, dtype=torch.float32).unsqueeze(0)  # (1, T)
+        relative_position = position - position.transpose(0, 1)  # (T, T)
         
+        # Non-learnable position interaction (like in DIET)
+        position_scores = -torch.abs(relative_position)  # Closer positions get higher scores
+        return position_scores.to(self.pos_embed.device)
+        
+    def forward(self, x):
+        x = x + self.pos_embed  # (B, T, C) #reinforce embeddings
+
+        prior = self.dyt3(x.clone())  # Shape: (B, T, C)
+
         # Apply dropout (keeps shape unchanged)
         x = self.dropout(x)  # (B, T, C)
         
         # Add block-specific positional embedding (broadcasts over batch and tokens)
-        x = x + self.pos_embed  # (B, T, C)
         
         # Apply Dynamic Tanh normalization (DyT) → still (B, T, C)
         x = self.dyt(x)
@@ -74,10 +84,16 @@ class NewAttentionBlock(nn.Module):
         K = self.W_k(x)  # (B, T, C)
         V = self.W_v(x)  # (B, T, C)
         
-        # Compute standard scaled dot-product attention.
-        # attn_scores: (B, T, T)
-        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.emb_dim)
+        # Compute standard scaled dot-product attention
+        content_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.emb_dim)  # (B, T, T)
+        
+        # Compute explicit position-dependent interaction (DIET's approach)
+        position_scores = self.compute_positional_scores(x.shape[1])  # (T, T) fixed position bias
+        
+        # Combine both for final attention scores
+        attn_scores = content_scores + position_scores  # (B, T, T)
         attn_weights = F.softmax(attn_scores, dim=-1)  # (B, T, T)
+
         
         # Multiply attention weights by V to get attended output.
         # The resulting shape remains (B, T, C)
