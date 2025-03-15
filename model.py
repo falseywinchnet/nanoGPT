@@ -28,7 +28,7 @@ class DyT(nn.Module):
 class NewAttentionBlock(nn.Module):
     def __init__(self,config):
         super().__init__()
-        self.emb_dim = config.emb_dim
+        self.emb_dim = config.n_embd
         self.n_heads = config.n_head
         self.dropout = nn.Dropout(config.dropout)
         
