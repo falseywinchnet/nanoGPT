@@ -72,9 +72,13 @@ class NewAttentionBlock(nn.Module):
         # Step 4: Compute Mahalanobis distance efficiently
         diff = x[:, :, None, :] - x[:, None, :, :]  # Shape: (B, T, T, C)
         
-        # Compute the quadratic Mahalanobis term in a memory-efficient way
-        left = torch.matmul(diff, inv_cov_matrix)  # Shape: (B, T, T, C)
-        mahalanobis_scores = torch.sqrt(torch.sum(left * diff, dim=-1))  # Final Shape: (B, T, T)
+        # Expand inv_cov_matrix for correct broadcasting
+        inv_cov_matrix = inv_cov_matrix.unsqueeze(1).unsqueeze(1)  # Shape: (B, 1, 1, C, C)
+        
+        # Perform batch-wise Mahalanobis multiplication
+        left = torch.matmul(diff.unsqueeze(-2), inv_cov_matrix)  # Shape: (B, T, T, 1, C)
+        mahalanobis_scores = torch.sqrt(torch.matmul(left, diff.unsqueeze(-1)).squeeze(-1).squeeze(-1))  # (B, T, T)
+
         # Convert Mahalanobis distance to attention weights
         attn_weights = torch.exp(-mahalanobis_scores)
         attn_probs = F.softmax(attn_weights, dim=-1)
