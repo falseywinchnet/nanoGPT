@@ -15,9 +15,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class DyT(nn.Module):
-    def __init__(self, num_features, alpha_init_value=0.5):
+    def __init__(self, num_features):
         super().__init__()
-        self.alpha = nn.Parameter(torch.ones(1) * alpha_init_value)
+        self.alpha = nn.Parameter(torch.ones(1))
         self.weight = nn.Parameter(torch.ones(num_features))
         self.bias = nn.Parameter(torch.zeros(num_features))
     
@@ -26,14 +26,14 @@ class DyT(nn.Module):
         return x * self.weight + self.bias
 
 class NewAttentionBlock(nn.Module):
-    def __init__(self, n_embd, n_head, dropout=0.1, alpha=1.0, expansion_factor=4):
+    def __init__(self):
         super().__init__()
-        self.emb_dim = emb_dim
-        self.n_heads = n_heads
-        self.dropout = nn.Dropout(dropout)
+        self.emb_dim = config.emb_dim
+        self.n_heads = config.n_head
+        self.dropout = nn.Dropout(config.dropout)
         
         # DyT normalization
-        self.dyt = DyT(emb_dim, alpha_init_value=alpha)
+        self.dyt = DyT(emb_dim)
 
         # Positional embedding (unique to each block)
         self.pos_embed = nn.Parameter(torch.randn(1, 1, emb_dim))
@@ -42,8 +42,8 @@ class NewAttentionBlock(nn.Module):
         self.attn_projection = nn.Linear(emb_dim, emb_dim, bias=True)
 
         # Feedforward layers
-        self.expand = nn.Linear(emb_dim, expansion_factor * emb_dim)
-        self.contract = nn.Linear(expansion_factor * emb_dim, emb_dim)
+        self.expand = nn.Linear(emb_dim, 4 * emb_dim)
+        self.contract = nn.Linear(4 * emb_dim, emb_dim)
         self.gelu = nn.GELU()
 
     def forward(self, x):
