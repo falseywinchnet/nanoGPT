@@ -24,21 +24,27 @@ class LayerNorm(nn.Module):
 class ConceptualInterpolator(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
+        # Here, n_embd = d, the embedding dimension.
+        # The interpolator takes in each row of size 2d and outputs a row of size d.
         self.interpolate = nn.Sequential(
-            nn.Linear(2 * n_embd, 4 * n_embd),  # Expanding to 5× hidden space
+            nn.Linear(2 * n_embd, 5 * n_embd),  # Optionally expanding to a higher-dimensional space
             nn.GELU(),
-            nn.Linear(4 * n_embd, n_embd),  # Bringing it back down
+            nn.Linear(5 * n_embd, n_embd)         # Compressing back to d
         )
 
     def forward(self, weight_prev, weight_next):
-            """Interpolates between previous and next attention weights"""
-            w_prev_flat = weight_prev.view(1, 3 * weight_prev.shape[1], weight_prev.shape[0])  
-            w_next_flat = weight_next.view(1, 3 * weight_next.shape[1], weight_next.shape[0])
-    
-            combined = torch.cat([w_prev_flat, w_next_flat], dim=-1)  # Concatenate along last dim
-            
-            interpolated = self.interpolate(combined)  # Output shape: (1, 3 * n_embd, n_embd)
-            return interpolated.squeeze(0)  # Remove batch-like dimension for direct copying
+        """
+        weight_prev: (3 * n_embd, n_embd)
+        weight_next: (3 * n_embd, n_embd)
+        """
+        # Concatenate along the last dimension:
+        # Each row becomes a vector of size (d + d) = 2d.
+        combined = torch.cat([weight_prev, weight_next], dim=-1)  # shape: (3 * n_embd, 2 * n_embd)
+        
+        # Apply the interpolation network row-wise
+        interpolated = self.interpolate(combined)  # shape: (3 * n_embd, n_embd)
+        return interpolated
+
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
