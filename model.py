@@ -105,11 +105,11 @@ class NewAttentionBlock(nn.Module):
         
         # --- Compute Divergence Loss (JS loss) ---
         # We compute a symmetric KL divergence between the softmax-normalized prior and posterior.
-        m = 0.5 * (prior + posterior)
-        js_loss = 0.5 * (F.kl_div(prior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean') +
-                         F.kl_div(posterior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean'))
+        #m = 0.5 * (prior + posterior)
+        #js_loss = 0.5 * (F.kl_div(prior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean') +
+        #                 F.kl_div(posterior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean'))
         
-        return posterior, js_loss
+        return posterior, 0.0
 
     
 @dataclass
