@@ -313,7 +313,8 @@ class GPT(nn.Module):
         
         for i, block in enumerate(self.transformer.residual):
             #for all but the first and last process througn an interblock from self.transformer.secondary
-            if i %2 and i < len(self.transformer.residual)-1:
+            if i > 0 and i+1 %2 and i < len(self.transformer.residual)-1:
+            #every odd indexed item
                 with torch.no_grad():  # Prevents gradient tracking issues
 
                     self.transformer.residual[i].attn.c_attn.weight.copy_(
