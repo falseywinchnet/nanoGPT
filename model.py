@@ -31,15 +31,14 @@ class ConceptualInterpolator(nn.Module):
         )
 
     def forward(self, weight_prev, weight_next):
-        """Interpolates between previous and next attention weights"""
-        # Expecting input shape of (3 * n_embd, n_embd) for each
-        w_prev_flat = weight_prev.view(3 * weight_prev.shape[1], weight_prev.shape[0])  
-        w_next_flat = weight_next.view(3 * weight_next.shape[1], weight_next.shape[0])
-
-        combined = torch.cat([w_prev_flat, w_next_flat], dim=-1)  # (3 * n_embd, 2 * n_embd)
-        
-        interpolated = self.interpolate(combined)  # Output shape: (3 * n_embd, n_embd)
-        return interpolated.view_as(weight_prev)  # Reshape to match original
+            """Interpolates between previous and next attention weights"""
+            w_prev_flat = weight_prev.view(1, 3 * weight_prev.shape[1], weight_prev.shape[0])  
+            w_next_flat = weight_next.view(1, 3 * weight_next.shape[1], weight_next.shape[0])
+    
+            combined = torch.cat([w_prev_flat, w_next_flat], dim=-1)  # Concatenate along last dim
+            
+            interpolated = self.interpolate(combined)  # Output shape: (1, 3 * n_embd, n_embd)
+            return interpolated.squeeze(0)  # Remove batch-like dimension for direct copying
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
