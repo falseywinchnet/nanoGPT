@@ -144,16 +144,7 @@ class GPT(nn.Module):
         params are actually used as weights in the final layer, so we include them.
         """
         n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()
         return n_params
-
-    def _build_rope_frequencies(self, head_dim):
-        # e.g. head_dim = 32
-        half_dim = head_dim // 2  # =16
-        return 1.0 / (
-            10000 ** (torch.arange(0, half_dim, dtype=torch.float32) / half_dim)
-        )
         
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -228,11 +219,9 @@ class GPT(nn.Module):
         """
         b, t = idx.shape
         device = idx.device
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
-        pos2 = torch.flip(pos, dims=[0])
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
-        x = tok_emb #+ phase_emb
+        x = tok_emb 
                  
         total_kl_loss = 0.0
         # Pass through each block
