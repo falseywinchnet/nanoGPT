@@ -317,10 +317,10 @@ class GPT(nn.Module):
             #every odd indexed item
                 with torch.no_grad():  # Prevents gradient tracking issues
 
-                    self.transformer.residual[i].attn.c_attn.weight.copy_(
+                    self.transformer.residual[i].attn.c_attn.weight.copy_((
                             self.transformer.residual[i-1].attn.c_attn.weight +
                             self.transformer.residual[i + 1].attn.c_attn.weight
-                    ) / 2
+                    ) / 2)
             x = block(x, rope_freqs=self.rope_freqs)
    
             
