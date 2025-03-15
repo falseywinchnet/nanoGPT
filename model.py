@@ -37,8 +37,6 @@ class NewAttentionBlock(nn.Module):
         self.dyt2 = DyT(self.emb_dim)
         self.dyt3 = DyT(self.emb_dim)
 
-        # Positional embedding unique to this block
-        self.pos_embed = nn.Parameter(torch.randn(1, 1, self.emb_dim))
         
         self.W_q = nn.Linear(self.emb_dim, self.emb_dim, bias=False)
         self.W_k = nn.Linear(self.emb_dim, self.emb_dim, bias=False)
@@ -63,7 +61,6 @@ class NewAttentionBlock(nn.Module):
         return position_scores.to(self.pos_embed.device)
         
     def forward(self, x):
-        x = x + self.pos_embed  # (B, T, C) #reinforce embeddings
 
         prior = self.dyt3(x.clone())  # Shape: (B, T, C)
 
@@ -145,6 +142,8 @@ class GPT(nn.Module):
         self.config = config
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+
             residual = nn.ModuleList([NewAttentionBlock(config) for _ in range(config.n_layer)])
         ))
         
@@ -248,7 +247,11 @@ class GPT(nn.Module):
         device = idx.device
         # Standard token + position embeddings
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
-        x = tok_emb 
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
                  
         total_kl_loss = 0.0
         # Pass through each block
