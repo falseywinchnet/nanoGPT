@@ -245,7 +245,7 @@ class GPT(nn.Module):
             x, kl_loss = block(x)   
             total_kl_loss += kl_loss
         # Final layernorm
-        return x
+        return x, total_kl_loss
     
         
     def crop_block_size(self, block_size):
