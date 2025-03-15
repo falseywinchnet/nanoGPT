@@ -38,10 +38,9 @@ class NewAttentionBlock(nn.Module):
         # Positional embedding unique to this block
         self.pos_embed = nn.Parameter(torch.randn(1, 1, self.emb_dim))
         
-        # Add a whitening transform (learned linear transformation, no bias)
-        self.whiten = nn.Linear(self.emb_dim, self.emb_dim, bias=False)
-        # Initialize the whitening matrix to identity
-        nn.init.eye_(self.whiten.weight)
+        self.W_q = nn.Linear(self.emb_dim, self.emb_dim, bias=False)
+        self.W_k = nn.Linear(self.emb_dim, self.emb_dim, bias=False)
+        self.W_v = nn.Linear(self.emb_dim, self.emb_dim, bias=False)
         
         # Attention projection (applied after attention)
         self.attn_projection = nn.Linear(self.emb_dim, self.emb_dim, bias=True)
@@ -67,13 +66,11 @@ class NewAttentionBlock(nn.Module):
         # --- Whitening and Ordinary Attention ---
         # Apply the whitening transform to decorrelate features.
         # This aims to approximate the effect of a Mahalanobis measure.
-        whitened_x = self.whiten(x)  # (B, T, C)
         
         # Compute queries, keys, values.
-        # Here we use the whitened representations for queries and keys,
-        # while using the original (or whitened) x for values.
-        Q = whitened_x  # (B, T, C)
-        K = whitened_x  # (B, T, C)
+        Q = self.W_q(x)  # (B, T, C)
+        K = self.W_k(x)  # (B, T, C)
+        V = self.W_v(x)  # (B, T, C)
         V = x         # (B, T, C) – you could also use whitened_x for V
         
         # Compute standard scaled dot-product attention.
@@ -96,20 +93,17 @@ class NewAttentionBlock(nn.Module):
         x = self.expand(x)
         x = self.gelu(x)
         x = self.contract(x)
-        
-        # Ensure shape consistency for residual addition.
-        assert x.shape == prior.shape, f"Shape mismatch: x={x.shape}, prior={prior.shape}"
-        
+                
         # Residual addition: add the original input back.
         posterior = x + prior  # (B, T, C)
         
         # --- Compute Divergence Loss (JS loss) ---
         # We compute a symmetric KL divergence between the softmax-normalized prior and posterior.
-        #m = 0.5 * (prior + posterior)
-        #js_loss = 0.5 * (F.kl_div(prior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean') +
-        #                 F.kl_div(posterior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean'))
+        m = 0.5 * (prior + posterior)
+        js_loss = 0.5 * (F.kl_div(prior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean') +
+                         F.kl_div(posterior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean'))
         
-        return posterior, 0.0
+        return posterior, js_loss
 
     
 @dataclass
