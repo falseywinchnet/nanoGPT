@@ -313,7 +313,7 @@ class GPT(nn.Module):
         
         for i, block in enumerate(self.transformer.residual):
             #for all but the first and last process througn an interblock from self.transformer.secondary
-            if i %2 and i < len(self.transformer.residual)):
+            if i %2 and i < len(self.transformer.residual):
                  self.transformer.residual[i].attn.c_attn.weight = (
                         self.transformer.residual[i-1].attn.c_attn.weight +
                         self.transformer.residual[i + 1].attn.c_attn.weight
