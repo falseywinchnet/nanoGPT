@@ -120,11 +120,6 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # weight tying: share the weights between the token embedding and the final output layer.
         self.transformer.wte.weight = self.lm_head.weight
-        if config.use_rope:
-            head_dim = config.n_embd // config.n_head
-            self.register_buffer("rope_freqs", self._build_rope_frequencies(head_dim))
-        else:
-            self.rope_freqs = None
 
         # init all weights
         self.apply(self._init_weights)
