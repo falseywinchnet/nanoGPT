@@ -60,7 +60,8 @@ class NewAttentionBlock(nn.Module):
         x = self.dyt(x)
 
         # Compute Mahalanobis-based Attention
-        cov_matrix = torch.cov(x.T)
+        x_centered = x - x.mean(dim=1, keepdim=True)  # Center each sequence
+        cov_matrix = torch.matmul(x_centered.transpose(1, 2), x_centered) / (x.shape[1] - 1)  # Compute covariance approx
         inv_cov_matrix = torch.inverse(cov_matrix + torch.eye(cov_matrix.shape[0], device=x.device) * 1e-6)
         diff = x[:, :, None, :] - x[:, None, :, :]  # Pairwise differences
         mahalanobis_scores = torch.sqrt(torch.sum(diff @ inv_cov_matrix * diff, dim=-1))
