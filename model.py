@@ -59,12 +59,20 @@ class NewAttentionBlock(nn.Module):
         # Apply Dynamic Tanh (DyT instead of normalization)
         x = self.dyt(x)
 
-        # Compute Mahalanobis-based Attention
-        x_centered = x - x.mean(dim=1, keepdim=True)  # Center each sequence
-        cov_matrix = torch.matmul(x_centered.transpose(1, 2), x_centered) / (x.shape[1] - 1)  # Compute covariance approx
-        inv_cov_matrix = torch.inverse(cov_matrix + torch.eye(cov_matrix.shape[0], device=x.device) * 1e-6)
-        diff = x[:, :, None, :] - x[:, None, :, :]  # Pairwise differences
-        mahalanobis_scores = torch.sqrt(torch.sum(diff @ inv_cov_matrix * diff, dim=-1))
+        # Step 1: Mean-center x to compute covariance
+        x_centered = x - x.mean(dim=1, keepdim=True)  # (B, T, C)
+        
+        # Step 2: Compute batch-wise covariance approximation
+        cov_matrix = torch.matmul(x_centered.transpose(1, 2), x_centered) / (x.shape[1] - 1)  # (B, C, C)
+        
+        # Step 3: Add identity matrix (corrected size) for numerical stability
+        eye = torch.eye(cov_matrix.shape[-1], device=x.device).expand_as(cov_matrix) * 1e-6
+        inv_cov_matrix = torch.inverse(cov_matrix + eye)  # (B, C, C)
+        
+        # Step 4: Compute Mahalanobis distance
+        diff = x[:, :, None, :] - x[:, None, :, :]  # Pairwise differences, (B, T, T, C)
+        mahalanobis_scores = torch.sqrt(torch.sum(diff @ inv_cov_matrix * diff, dim=-1))  # (B, T, T)
+
         
         # Convert Mahalanobis distance to attention weights
         attn_weights = torch.exp(-mahalanobis_scores)
