@@ -67,11 +67,16 @@ class NewAttentionBlock(nn.Module):
         
         # Step 3: Add identity matrix (corrected size) for numerical stability
         eye = torch.eye(cov_matrix.shape[-1], device=x.device).expand_as(cov_matrix) * 1e-6
-        inv_cov_matrix = torch.inverse(cov_matrix + eye)  # (B, C, C)
         
         # Step 4: Compute Mahalanobis distance
-        diff = x[:, :, None, :] - x[:, None, :, :]  # Pairwise differences, (B, T, T, C)
-        mahalanobis_scores = torch.sqrt(torch.sum(diff @ inv_cov_matrix * diff, dim=-1))  # (B, T, T)
+        # Compute Mahalanobis distance
+        diff = x[:, :, None, :] - x[:, None, :, :]  # Shape: (B, T, T, C)
+        
+        # Reshape inv_cov_matrix for batch-wise multiplication
+        inv_cov_matrix = inv_cov_matrix.unsqueeze(1).unsqueeze(1)  # Shape: (B, 1, 1, C, C)
+        
+        # Perform batch matrix multiplication correctly
+        mahalanobis_scores = torch.sqrt(torch.einsum('btij,btjk,btkl->btil', diff, inv_cov_matrix, diff))  # (B, T, T)
 
         
         # Convert Mahalanobis distance to attention weights
