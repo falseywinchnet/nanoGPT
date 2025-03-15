@@ -33,17 +33,17 @@ class NewAttentionBlock(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
         
         # DyT normalization
-        self.dyt = DyT(emb_dim)
+        self.dyt = DyT(self.emb_dim)
 
         # Positional embedding (unique to each block)
-        self.pos_embed = nn.Parameter(torch.randn(1, 1, emb_dim))
+        self.pos_embed = nn.Parameter(torch.randn(1, 1, self.emb_dim))
 
         # Mahalanobis-based Attention
-        self.attn_projection = nn.Linear(emb_dim, emb_dim, bias=True)
+        self.attn_projection = nn.Linear(self.emb_dim, self.emb_dim, bias=True)
 
         # Feedforward layers
-        self.expand = nn.Linear(emb_dim, 4 * emb_dim)
-        self.contract = nn.Linear(4 * emb_dim, emb_dim)
+        self.expand = nn.Linear(self.emb_dim, 4 * self.emb_dim)
+        self.contract = nn.Linear(4 * self.emb_dim, self.emb_dim)
         self.gelu = nn.GELU()
 
     def forward(self, x):
