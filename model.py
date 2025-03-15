@@ -58,7 +58,7 @@ class NewAttentionBlock(nn.Module):
         
         # Non-learnable position interaction (like in DIET)
         position_scores = -torch.abs(relative_position)  # Closer positions get higher scores
-        return position_scores.to(self.pos_embed.device)
+        return position_scores.to(self.attn_projection.device)
         
     def forward(self, x):
 
