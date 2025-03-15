@@ -68,6 +68,7 @@ class NewAttentionBlock(nn.Module):
         # Step 3: Add identity matrix (corrected size) for numerical stability
         eye = torch.eye(cov_matrix.shape[-1], device=x.device).expand_as(cov_matrix) * 1e-6
         inv_cov_matrix = torch.inverse(cov_matrix + eye)  # Shape: (B, C, C)
+        diff = x[:, :, None, :] - x[:, None, :, :]  # Shape: (B, T, T, C)
 
         # Step 4: Compute Mahalanobis distance
         # Compute Mahalanobis distance
