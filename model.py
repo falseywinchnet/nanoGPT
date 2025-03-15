@@ -90,6 +90,7 @@ class NewAttentionBlock(nn.Module):
         x = self.expand(x)
         x = self.gelu(x)
         x = self.contract(x)
+        assert x.shape == prior.shape, f"Shape mismatch: x={x.shape}, prior={prior.shape}"
 
         # Add residual prior back
         posterior = x + prior
