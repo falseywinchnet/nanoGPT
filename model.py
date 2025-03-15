@@ -93,15 +93,12 @@ class CausalSelfAttention(nn.Module):
         return q, k
         
 
-    def forward(self, x, rope_freqs=None):
-        """
-        x:  (B, T, C) primary embeddings
-        x2: (B, T, C) secondary embeddings (if any)
-        """        
+    def forward(self, x, rope_freqs=None, custom_weight=None):
+
+
         B, T, C = x.size()
-
-
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        weight = custom_weight if custom_weight is not None else self.c_attn.weight
+        q, k, v = F.linear(x, weight).split(self.n_embd, dim=2)
 
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
@@ -168,13 +165,13 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.mlp = MLP(config)
     
-    def forward(self, x, rope_freqs):
+    def forward(self, x, rope_freqs,c):
             """
             Iteratively apply attention and MLP with residuals over multiple steps.
             """
             prior = x
             x = self.ln_1(x)
-            x = self.attn(x, rope_freqs)
+            x = self.attn(x, rope_freqs,c)
             # --- Step 2: Compute Absolute Positional Bias ---
             # Apply normalization and MLP (using the residual)
             x = self.ln_2(x)
@@ -343,11 +340,11 @@ class GPT(nn.Module):
             if i > 0 and (i + 1) % 2 and i < len(self.transformer.residual) - 1:
                 weight_prev = self.transformer.residual[i - 1].attn.c_attn.weight
                 weight_next = self.transformer.residual[i + 1].attn.c_attn.weight
-                interpolated_weight = self.transformer.interpolators[i](weight_prev, weight_next)  
-                with torch.no_grad():
-                    block.attn.c_attn.weight.copy_(interpolated_weight)
+                c = self.transformer.interpolators[i](weight_prev, weight_next)  
+            else:
+                c = None
         
-            x = block(x, rope_freqs=self.rope_freqs)
+            x = block(x, rope_freqs=self.rope_freqs,c)
    
             
         # Final layernorm
