@@ -68,15 +68,7 @@ class CausalSelfAttention(nn.Module):
         k = torch.cat([k1*cos_theta - k2*sin_theta, k1*sin_theta + k2*cos_theta], dim=-1)
         return q, k
         
-    def compute_positional_scores(self, seq_len):
-        """Creates a position-dependent bias matrix (T, T)"""
-        position = torch.arange(seq_len, dtype=torch.float32).unsqueeze(0)  # (1, T)
-        relative_position = position - position.transpose(0, 1)  # (T, T)
-        
-        # Non-learnable position interaction (like in DIET)
-        position_scores = -torch.abs(relative_position)  # Closer positions get higher scores
-        return position_scores
-        
+
     def forward(self, x, rope_freqs=None):
         """
         x:  (B, T, C) primary embeddings
@@ -105,8 +97,6 @@ class CausalSelfAttention(nn.Module):
             print("Nope not today!")
             att_scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             position_scores = self.compute_positional_scores(x.shape[1]).to(x.device)  # (T, T) fixed position bias
-            attn_scores = content_scores + position_scores  # (B, T, T)
-
             att_scores = att_scores.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
 
             att_probs = F.softmax(att_scores, dim=-1)
@@ -166,11 +156,7 @@ class Block(nn.Module):
             x = self.ln_2(x)
             x = self.mlp(x)
             posterior = x + prior
-            m = 0.5 * (prior + posterior)
-            js_loss = 0.5 * (F.kl_div(prior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean') +
-                         F.kl_div(posterior.log_softmax(dim=-1), m.softmax(dim=-1), reduction='batchmean'))
-        
-            return posterior, js_loss
+            return posterior, 0.0
     
 @dataclass
 class GPTConfig:
