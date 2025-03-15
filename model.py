@@ -204,7 +204,7 @@ class GPT(nn.Module):
             residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             interpolators = nn.ModuleList([
                 ConceptualInterpolator(config.n_embd * 3 * config.n_embd)  # size matches attn.c_attn.weight flattened
-                for _ in range(len(self.transformer.residual))
+                for _ in range(config.n_layer)
             ]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
