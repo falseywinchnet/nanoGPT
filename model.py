@@ -34,7 +34,9 @@ class NewAttentionBlock(nn.Module):
         
         # DyT normalization (replaces LayerNorm)
         self.dyt = DyT(self.emb_dim)
-        
+        self.dyt2 = DyT(self.emb_dim)
+        self.dyt3 = DyT(self.emb_dim)
+
         # Positional embedding unique to this block
         self.pos_embed = nn.Parameter(torch.randn(1, 1, self.emb_dim))
         
@@ -52,7 +54,7 @@ class NewAttentionBlock(nn.Module):
 
     def forward(self, x):
         # Copy x as prior for the residual connection.
-        prior = x.clone()  # Shape: (B, T, C)
+        prior = self.dyt3(x.clone())  # Shape: (B, T, C)
         
         # Apply dropout (keeps shape unchanged)
         x = self.dropout(x)  # (B, T, C)
@@ -85,7 +87,7 @@ class NewAttentionBlock(nn.Module):
         attn_output = self.attn_projection(attn_output)  # (B, T, C)
         
         # Apply second DyT scaling.
-        x = self.dyt(attn_output)  # (B, T, C)
+        x = self.dyt2(attn_output)  # (B, T, C)
         
         # --- Feedforward Transformation ---
         # Expand → GELU → Contract: (B, T, C) -> (B, T, 4C) -> (B, T, 4C) -> (B, T, C)
