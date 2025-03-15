@@ -60,25 +60,21 @@ class NewAttentionBlock(nn.Module):
         x = self.dyt(x)
 
         # Step 1: Mean-center x to compute covariance
-        x_centered = x - x.mean(dim=1, keepdim=True)  # (B, T, C)
+        x_centered = x - x.mean(dim=1, keepdim=True)  # Shape: (B, T, C)
         
         # Step 2: Compute batch-wise covariance approximation
         cov_matrix = torch.matmul(x_centered.transpose(1, 2), x_centered) / (x.shape[1] - 1)  # (B, C, C)
         
-        # Step 3: Add identity matrix (corrected size) for numerical stability
+        # Step 3: Add identity matrix for numerical stability
         eye = torch.eye(cov_matrix.shape[-1], device=x.device).expand_as(cov_matrix) * 1e-6
         inv_cov_matrix = torch.inverse(cov_matrix + eye)  # Shape: (B, C, C)
-        diff = x[:, :, None, :] - x[:, None, :, :]  # Shape: (B, T, T, C)
-
-        # Step 4: Compute Mahalanobis distance
-        # Compute Mahalanobis distance
-        diff = diff.unsqueeze(-2)  # Shape: (B, T, T, 1, C)
-        inv_cov_matrix = inv_cov_matrix.unsqueeze(1).unsqueeze(1)  # Shape: (B, 1, 1, C, C)
         
-        # Apply Mahalanobis transformation
-        mahalanobis_scores = torch.sqrt(
-            torch.matmul(torch.matmul(diff, inv_cov_matrix), diff.transpose(-2, -1))
-        ).squeeze(-1).squeeze(-1)  # Final Shape: (B, T, T)
+        # Step 4: Compute Mahalanobis distance efficiently
+        diff = x[:, :, None, :] - x[:, None, :, :]  # Shape: (B, T, T, C)
+        
+        # Compute the quadratic Mahalanobis term in a memory-efficient way
+        left = torch.matmul(diff, inv_cov_matrix)  # Shape: (B, T, T, C)
+        mahalanobis_scores = torch.sqrt(torch.sum(left * diff, dim=-1))  # Final Shape: (B, T, T)
         # Convert Mahalanobis distance to attention weights
         attn_weights = torch.exp(-mahalanobis_scores)
         attn_probs = F.softmax(attn_weights, dim=-1)
