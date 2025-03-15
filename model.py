@@ -20,7 +20,22 @@ class LayerNorm(nn.Module):
 
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
-            
+        
+class ConceptualInterpolator(nn.Module):
+    def __init__(self, weight_dim):
+        super().__init__()
+        self.interpolate = nn.Sequential(
+            nn.Linear(weight_dim * 2, weight_dim),
+            nn.GELU(),
+            nn.Linear(weight_dim, weight_dim),
+        )
+
+    def forward(self, weight_prev, weight_next):
+        w_prev_flat = weight_prev.view(-1)
+        w_next_flat = weight_next.view(-1)
+        combined = torch.cat([w_prev_flat, w_next_flat], dim=-1)
+        interpolated = self.interpolate(combined)
+        return interpolated.view_as(weight_prev)           
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -187,6 +202,10 @@ class GPT(nn.Module):
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            self.interpolators = nn.ModuleList([
+                ConceptualInterpolator(config.n_embd * 3 * config.n_embd)  # size matches attn.c_attn.weight flattened
+                for _ in range(len(self.transformer.residual))
+            ]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
      
@@ -312,15 +331,12 @@ class GPT(nn.Module):
         # Pass through each block
         
         for i, block in enumerate(self.transformer.residual):
-            #for all but the first and last process througn an interblock from self.transformer.secondary
-            if i > 0 and i+1 %2 and i < len(self.transformer.residual)-1:
-            #every odd indexed item
-                with torch.no_grad():  # Prevents gradient tracking issues
-
-                    self.transformer.residual[i].attn.c_attn.weight.copy_((
-                            self.transformer.residual[i-1].attn.c_attn.weight +
-                            self.transformer.residual[i + 1].attn.c_attn.weight
-                    ) / 2)
+            if i > 0 and (i + 1) % 2 and i < len(self.transformer.residual) - 1:
+                weight_prev = self.transformer.residual[i - 1].attn.c_attn.weight
+                weight_next = self.transformer.residual[i + 1].attn.c_attn.weight
+                interpolated_weight = self.interpolators[i](weight_prev, weight_next)        
+                block.attn.c_attn.weight.copy_(interpolated_weight)
+        
             x = block(x, rope_freqs=self.rope_freqs)
    
             
