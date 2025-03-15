@@ -205,7 +205,7 @@ class GPT(nn.Module):
         b, original_t = idx.shape
 
         # ---- Normal single forward pass for the given sequence ----
-        x, kl_Loss = self._run_transformer(idx)  # shape (b, t, n_embd)
+        x, kl_loss = self._run_transformer(idx)  # shape (b, t, n_embd)
         
         if return_features:
             # If we want the final hidden states:
