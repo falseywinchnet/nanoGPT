@@ -22,20 +22,24 @@ class LayerNorm(nn.Module):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
         
 class ConceptualInterpolator(nn.Module):
-    def __init__(self, weight_dim):
+    def __init__(self, n_embd):
         super().__init__()
         self.interpolate = nn.Sequential(
-            nn.Linear(weight_dim * 2, weight_dim),
+            nn.Linear(2 * n_embd, 4 * n_embd),  # Expanding to 5× hidden space
             nn.GELU(),
-            nn.Linear(weight_dim, weight_dim),
+            nn.Linear(4 * n_embd, n_embd),  # Bringing it back down
         )
 
     def forward(self, weight_prev, weight_next):
-        w_prev_flat = weight_prev.view(-1)
-        w_next_flat = weight_next.view(-1)
-        combined = torch.cat([w_prev_flat, w_next_flat], dim=-1)
-        interpolated = self.interpolate(combined)
-        return interpolated.view_as(weight_prev)           
+        """Interpolates between previous and next attention weights"""
+        # Expecting input shape of (3 * n_embd, n_embd) for each
+        w_prev_flat = weight_prev.view(3 * weight_prev.shape[1], weight_prev.shape[0])  
+        w_next_flat = weight_next.view(3 * weight_next.shape[1], weight_next.shape[0])
+
+        combined = torch.cat([w_prev_flat, w_next_flat], dim=-1)  # (3 * n_embd, 2 * n_embd)
+        
+        interpolated = self.interpolate(combined)  # Output shape: (3 * n_embd, n_embd)
+        return interpolated.view_as(weight_prev)  # Reshape to match original
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -203,7 +207,7 @@ class GPT(nn.Module):
             drop = nn.Dropout(config.dropout),
             residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             interpolators = nn.ModuleList([
-                ConceptualInterpolator(config.n_embd * 3 * config.n_embd)  # size matches attn.c_attn.weight flattened
+                ConceptualInterpolator(config.n_embd)  # size matches attn.c_attn.weight flattened
                 for _ in range(config.n_layer)
             ]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
