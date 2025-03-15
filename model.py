@@ -97,7 +97,7 @@ class CausalSelfAttention(nn.Module):
 
 
         B, T, C = x.size()
-        weight = custom_weight if custom_weight is not None else self.c_attn.weight
+        weight = weights if weights is not None else self.c_attn.weight
         q, k, v = F.linear(x, weight).split(self.n_embd, dim=2)
 
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
