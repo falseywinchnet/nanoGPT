@@ -76,7 +76,7 @@ class CausalSelfAttention(nn.Module):
         """        
         B, T, C = x.size()
 
-        # ---- Primary pass Q,K,V ----
+
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
 
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
@@ -144,7 +144,7 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.mlp = MLP(config)
     
-    def forward(self, x, rope_freqs, num_iterations=3):
+    def forward(self, x, rope_freqs):
             """
             Iteratively apply attention and MLP with residuals over multiple steps.
             """
@@ -156,7 +156,7 @@ class Block(nn.Module):
             x = self.ln_2(x)
             x = self.mlp(x)
             posterior = x + prior
-            return posterior, 0.0
+            return posterior
     
 @dataclass
 class GPTConfig:
@@ -271,7 +271,7 @@ class GPT(nn.Module):
         b, original_t = idx.shape
 
         # ---- Normal single forward pass for the given sequence ----
-        x ,kl= self._run_transformer(idx)  # shape (b, t, n_embd)
+        x = self._run_transformer(idx)  # shape (b, t, n_embd)
         
         if return_features:
             # If we want the final hidden states:
@@ -288,7 +288,7 @@ class GPT(nn.Module):
                     targets.view(-1),
                     ignore_index=-1
                 )
-                loss = loss  + 0.1 * kl
+                loss = loss  
             return logits, loss
 
 
@@ -309,14 +309,21 @@ class GPT(nn.Module):
                 
         dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
         x = x * dropout_mask  
-        kls= 0.0
         # Pass through each block
+        
         for i, block in enumerate(self.transformer.residual):
-            x,kl = block(x, rope_freqs=self.rope_freqs)   
-            kls += kl
+            #for all but the first and last process througn an interblock from self.transformer.secondary
+            if i %2 and i < len(self.transformer.residual)):
+                 self.transformer.residual[i].attn.c_attn.weight = (
+                        self.transformer.residual[i-1].attn.c_attn.weight +
+                        self.transformer.residual[i + 1].attn.c_attn.weight
+                    ) / 2
+            x = block(x, rope_freqs=self.rope_freqs)
+   
+            
         # Final layernorm
         x = self.transformer.ln_f(x)
-        return x, kls
+        return x
     
         
     def crop_block_size(self, block_size):
