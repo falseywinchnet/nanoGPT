@@ -71,7 +71,6 @@ class NewAttentionBlock(nn.Module):
         Q = self.W_q(x)  # (B, T, C)
         K = self.W_k(x)  # (B, T, C)
         V = self.W_v(x)  # (B, T, C)
-        V = x         # (B, T, C) – you could also use whitened_x for V
         
         # Compute standard scaled dot-product attention.
         # attn_scores: (B, T, T)
