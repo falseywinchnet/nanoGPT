@@ -69,15 +69,12 @@ class NewAttentionBlock(nn.Module):
         eye = torch.eye(cov_matrix.shape[-1], device=x.device).expand_as(cov_matrix) * 1e-6
         inv_cov_matrix = torch.inverse(cov_matrix + eye)  # Shape: (B, C, C)
         
-        # Step 4: Compute Mahalanobis distance efficiently
-        diff = x[:, :, None, :] - x[:, None, :, :]  # Shape: (B, T, T, C)
+        # Step 4: Compute Mahalanobis distance for each token individually
+        diff = x - x.mean(dim=1, keepdim=True)  # Shape: (B, T, C) (centered per batch)
         
-        # Expand inv_cov_matrix for correct broadcasting
-        inv_cov_matrix = inv_cov_matrix.unsqueeze(1).unsqueeze(1)  # Shape: (B, 1, 1, C, C)
-        
-        # Perform batch-wise Mahalanobis multiplication
-        left = torch.matmul(diff.unsqueeze(-2), inv_cov_matrix)  # Shape: (B, T, T, 1, C)
-        mahalanobis_scores = torch.sqrt(torch.matmul(left, diff.unsqueeze(-1)).squeeze(-1).squeeze(-1))  # (B, T, T)
+        # Efficient batch-wise Mahalanobis computation (token-wise, avoiding T×T expansion)
+        left = torch.matmul(diff, inv_cov_matrix)  # (B, T, C)
+        mahalanobis_scores = torch.sqrt(torch.sum(left * diff, dim=-1))  # (B, T)
 
         # Convert Mahalanobis distance to attention weights
         attn_weights = torch.exp(-mahalanobis_scores)
