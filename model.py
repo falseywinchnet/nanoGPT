@@ -58,7 +58,7 @@ class NewAttentionBlock(nn.Module):
         
         # Non-learnable position interaction (like in DIET)
         position_scores = -torch.abs(relative_position)  # Closer positions get higher scores
-        return position_scores.to(self.attn_projection.device)
+        return position_scores
         
     def forward(self, x):
 
@@ -85,7 +85,7 @@ class NewAttentionBlock(nn.Module):
         content_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.emb_dim)  # (B, T, T)
         
         # Compute explicit position-dependent interaction (DIET's approach)
-        position_scores = self.compute_positional_scores(x.shape[1])  # (T, T) fixed position bias
+        position_scores = self.compute_positional_scores(x.shape[1]).to(x.device)  # (T, T) fixed position bias
         
         # Combine both for final attention scores
         attn_scores = content_scores + position_scores  # (B, T, T)
