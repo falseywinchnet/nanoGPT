@@ -26,7 +26,7 @@ class DyT(nn.Module):
         return x * self.weight + self.bias
 
 class NewAttentionBlock(nn.Module):
-    def __init__(self, emb_dim, n_heads, dropout=0.1, alpha=1.0, expansion_factor=4):
+    def __init__(self, n_embd, n_head, dropout=0.1, alpha=1.0, expansion_factor=4):
         super().__init__()
         self.emb_dim = emb_dim
         self.n_heads = n_heads
