@@ -221,7 +221,7 @@ class GPT(nn.Module):
         total_kl_loss = 0.0
         # Pass through each block
         for i, block in enumerate(self.transformer.residual):
-            x, kl_loss = block(x, rope_freqs=self.rope_freqs)   
+            x, kl_loss = block(x)   
             total_kl_loss += kl_loss
         # Final layernorm
         return x
