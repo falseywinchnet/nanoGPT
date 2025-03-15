@@ -78,10 +78,10 @@ class NewAttentionBlock(nn.Module):
 
         # Convert Mahalanobis distance to attention weights
         attn_weights = torch.exp(-mahalanobis_scores)
-        attn_probs = F.softmax(attn_weights, dim=-1)
+        attn_probs = F.softmax(attn_weights, dim=-1)  # (B, T, T)
+        attn_output = self.attn_projection(torch.matmul(attn_probs, x))  # Ensure (B, T, C)
+            
 
-        # Apply attention projection
-        attn_output = self.attn_projection(attn_probs @ x)
 
         # Apply second DyT scaling
         x = self.dyt(attn_output)
