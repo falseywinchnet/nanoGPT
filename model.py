@@ -182,6 +182,7 @@ class GPT(nn.Module):
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.layers = config.n_layer
 
         self.wte.weight = self.lm_head.weight  # Tie embeddings
 
@@ -249,7 +250,7 @@ class GPT(nn.Module):
           #  else:
         #        c = None
         # ---- Attention Stage ----
-        for i, attn, norm,mlp in zip(range(config.n_layer),self.attentions, self.ln_attn,self.mlps):
+        for i, attn, norm,mlp in zip(range(self.layers),self.attentions, self.ln_attn,self.mlps):
             
             x = attn(x,rope_freqs=self.rope_freqs,weights=None)
             x = norm(x)
