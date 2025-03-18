@@ -263,9 +263,8 @@ class GPT(nn.Module):
             if i == 0:
                 residual = residual + x #seed the stage
             else:
-                residual += source
                 residual += mlp(x)
-
+            x += source
         # Final norm and output
         x = self.ln_mlp(residual)
         logits = self.lm_head(x)
