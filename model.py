@@ -210,7 +210,7 @@ class GPT(nn.Module):
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()
+            n_params -= self.wpe.weight.numel()
         return n_params
 
     def _build_rope_frequencies(self, head_dim):
