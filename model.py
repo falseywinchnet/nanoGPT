@@ -253,8 +253,8 @@ class GPT(nn.Module):
             
             x = attn(x,rope_freqs=self.rope_freqs,weights=None)
             x = norm(x)
-            if i = 0:
-                residual = residual + x
+            if i == 0:
+                residual = residual + x #seed the stage
             else:
                 residual += mlp(x)
 
