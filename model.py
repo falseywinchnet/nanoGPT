@@ -249,7 +249,7 @@ class GPT(nn.Module):
           #  else:
         #        c = None
         # ---- Attention Stage ----
-        for i, attn, norm,mlp in zip(range(self.layers),self.attentions, self.ln_attn,self.mlps):
+        for i, attn, norm,mlp in zip(range(self.n_layer),self.attentions, self.ln_attn,self.mlps):
             
             x = attn(x,rope_freqs=self.rope_freqs,weights=None)
             x = norm(x)
