@@ -235,7 +235,6 @@ class GPT(nn.Module):
 
         pos = torch.arange(0, t, dtype=torch.long, device=device)
         x = self.wte(idx) + self.wpe(pos)
-        x = self.dropout(x)
 
         residual = x  # Keep initial residual state
 
