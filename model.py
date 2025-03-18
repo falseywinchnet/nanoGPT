@@ -223,41 +223,7 @@ class GPT(nn.Module):
         return 1.0 / (
             10000 ** (torch.arange(0, half_dim, dtype=torch.float32) / half_dim)
         )
-    def expand_attention_heads(self):
-        """Expands the number of attention heads while keeping `n_embd % n_head == 0`."""
-        
-        # Get the current device (assuming all model parameters are on the same device)
-        device = next(self.parameters()).device
-    
-        # Backup existing attention layers
-        old_attentions = self.attentions
-        old_head_count = self.config.n_head
-    
-        # Update config: Increase heads by 4
-        self.config.n_head += 4 
-    
-        # Create new attention layers and move them to the correct device
-        self.attentions = nn.ModuleList([
-            CausalSelfAttention(self.config).to(device) for _ in range(self.config.n_layer)
-        ])
-    
-        # Copy old weights into new attention layers
-        for i in range(len(self.attentions)):
-            old_weight = old_attentions[i].c_attn.weight.data.clone().detach().to(device)
-            new_weight = self.attentions[i].c_attn.weight.data
-    
-            # Copy over the old head weights (this is approximate)
-            num_weights_to_copy = min(old_weight.shape[0], new_weight.shape[0])
-            new_weight[:num_weights_to_copy, :old_weight.shape[1]] = old_weight[:num_weights_to_copy, :].to(device)
-            # ---- Recompute RoPE Frequencies ----
-            head_dim = self.config.n_embd // self.config.n_head  # Update head dimension
-            new_rope_freqs = self._build_rope_frequencies(head_dim).to(device)
-        
-            # Safely replace the buffer
-            if hasattr(self, "rope_freqs"):
-                del self.rope_freqs  # Remove old buffer to prevent conflicts
-        
-            self.register_buffer("rope_freqs", new_rope_freqs)
+
 
     
     
@@ -276,19 +242,6 @@ class GPT(nn.Module):
 
         pos = torch.arange(0, t, dtype=torch.long, device=device)
         x = self.wte(idx) + self.wpe(pos)
-        self.t+=1
-        if not self.t % 500 and self.t > 0 and self.jumps < 4:
-            if not self.freeze_mode and self.jumps < 3:
-                self.expand_attention_heads()  # Increase by min
-                self.jumps += 1
-                for mlp in self.mlps:
-                    mlp.freeze_weights()
-                self.freeze_mode = True
-            elif self.freeze_mode:
-                for mlp in self.mlps:
-                    mlp.unfreeze_weights()
-                self.freeze_mode = False
-
         
         residual = x  # Keep initial residual state
 
