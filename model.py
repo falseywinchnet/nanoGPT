@@ -121,9 +121,9 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.c_fc = nn.Linear(config.n_embd, 8 * config.n_embd, bias=config.bias)
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.activation = RainstarActivation()
-        self.c_proj = nn.Linear(8 * config.n_embd, config.n_embd, bias=False)
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
         self.dropout = nn.Dropout(config.dropout)
 
         # Buffers for frozen weights (not trainable)
