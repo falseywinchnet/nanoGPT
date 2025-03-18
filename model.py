@@ -260,7 +260,7 @@ class GPT(nn.Module):
             if i == 0:
                 residual = residual + attention_outputs[i]  # First residual update
             else:
-                residual = residual + mlp(attention_outputs[i])  # Update residual at each step
+                residual = residual + self.mlp[0](attention_outputs[i])  # Update residual at each step
 
         # Final norm and output
         x = self.ln_mlp(residual)
