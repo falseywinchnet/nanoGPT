@@ -258,12 +258,12 @@ class GPT(nn.Module):
         # ---- Attention Stage ----
         for i, attn, norm,mlp in zip(range(self.layers),self.attentions, self.ln_attn,self.mlps):
             
-            x = self.attentions[0](x,rope_freqs=self.rope_freqs,weights=None)
+            x = attn(x,rope_freqs=self.rope_freqs,weights=None)
             x = norm(x)
             if i == 0:
                 residual = residual + x #seed the stage
             else:
-                residual += mlp(x)
+                residual -= mlp(x)
 
         # Final norm and output
         x = self.ln_mlp(residual)
