@@ -244,7 +244,7 @@ class GPT(nn.Module):
         x = self.wte(idx) + self.wpe(pos)
         
         residual = x  # Keep initial residual state
-
+        source = x
         # Store intermediate attention products
         attention_outputs = []
         #
@@ -263,7 +263,8 @@ class GPT(nn.Module):
             if i == 0:
                 residual = residual + x #seed the stage
             else:
-                residual -= mlp(x)
+                residual += source
+                residual += mlp(x)
 
         # Final norm and output
         x = self.ln_mlp(residual)
