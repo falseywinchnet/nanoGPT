@@ -269,7 +269,7 @@ class GPT(nn.Module):
         self.t+=1
         if not self.t % 500 and self.t > 0:
             if not self.freeze_mode:
-                self.expand_attention_heads(self.config.n_head + 4)  # Increase by 4 heads
+                self.expand_attention_heads(self.config.n_head + 1)  # Increase by 1 heads
                 for mlp in self.mlps:
                     mlp.freeze_weights()
                 self.freeze_mode = True
