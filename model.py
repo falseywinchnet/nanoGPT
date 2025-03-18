@@ -252,7 +252,6 @@ class GPT(nn.Module):
             num_weights_to_copy = min(old_weight.shape[0], new_weight.shape[0])
             new_weight[:num_weights_to_copy, :old_weight.shape[1]] = old_weight[:num_weights_to_copy, :]
     
-        print(f"New attention heads added. Model will now train with {new_n_head} heads.")
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
