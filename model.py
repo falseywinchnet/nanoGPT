@@ -249,11 +249,12 @@ class GPT(nn.Module):
           #  else:
         #        c = None
         # ---- Attention Stage ----
+        iter = 0
         for attn, norm,mlp in zip(self.attentions, self.ln_attn,self.mlps):
             
             x = attn(x,rope_freqs=self.rope_freqs,weights=None)
             x = norm(x)
-            residual = residual + mlp(x)
+            residual = mlp(x+residual)
 
         # Final norm and output
         x = self.ln_mlp(residual)
