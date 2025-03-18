@@ -223,33 +223,43 @@ class GPT(nn.Module):
         return 1.0 / (
             10000 ** (torch.arange(0, half_dim, dtype=torch.float32) / half_dim)
         )
-    def expand_attention_heads(self, new_heads):
-        """
-        Expands the number of attention heads while preserving old ones.
-        """
-        print(f"Expanding attention heads from {self.config.n_head} to {new_heads}...")
-    
-        # Step 1: Backup existing attention weights
+    def find_next_valid_n_head(self,n_embd, current_n_head):
+        """Find the next valid number of attention heads that divides `n_embd`."""
+        for new_n_head in range(current_n_head + 1, n_embd + 1):
+            if n_embd % new_n_head == 0:
+                return new_n_head
+        return current_n_head  # Fallback (should never happen)
+
+    def expand_attention_heads(self):
+        """Expands the number of attention heads while keeping `n_embd % n_head == 0`."""
+        new_n_head = self.find_next_valid_n_head(self.config.n_embd, self.config.n_head)
+        
+        if new_n_head == self.config.n_head:
+            print("No valid head expansion possible, keeping current head count.")
+            return
+        
+        print(f"Expanding attention heads from {self.config.n_head} to {new_n_head}...")
+        
+        # Backup existing attention layers
         old_attentions = self.attentions
         old_head_count = self.config.n_head
     
-        # Step 2: Create new attention layers with more heads
-        self.config.n_head = new_heads
+        # Update config
+        self.config.n_head = new_n_head
         self.attentions = nn.ModuleList([
             CausalSelfAttention(self.config) for _ in range(self.config.n_layer)
         ])
     
-        # Step 3: Copy old weights into new attention heads
+        # Copy old weights into new attention layers
         for i in range(len(self.attentions)):
             old_weight = old_attentions[i].c_attn.weight.data.clone()
             new_weight = self.attentions[i].c_attn.weight.data
     
-            # Copy the old heads into the new matrix
-            new_weight[:old_weight.shape[0], :old_weight.shape[1]] = old_weight
+            # Copy over the old head weights (this is approximate)
+            num_weights_to_copy = min(old_weight.shape[0], new_weight.shape[0])
+            new_weight[:num_weights_to_copy, :old_weight.shape[1]] = old_weight[:num_weights_to_copy, :]
     
-        print(f"New attention heads added. Model will now train with {new_heads} heads.")
-
-
+        print(f"New attention heads added. Model will now train with {new_n_head} heads.")
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -269,7 +279,7 @@ class GPT(nn.Module):
         self.t+=1
         if not self.t % 500 and self.t > 0:
             if not self.freeze_mode:
-                self.expand_attention_heads(self.config.n_head + 1)  # Increase by 1 heads
+                self.expand_attention_heads()  # Increase by min
                 for mlp in self.mlps:
                     mlp.freeze_weights()
                 self.freeze_mode = True
