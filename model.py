@@ -179,8 +179,8 @@ class GPT(nn.Module):
         self.ln_attn = nn.ModuleList([LayerNorm(config.n_embd, bias=config.bias) for _ in range(config.n_layer)])
         self.mlps = nn.ModuleList([MLP(config) for _ in range(config.n_layer)])
         self.ln_mlp = LayerNorm(config.n_embd, bias=config.bias)
-        wte = nn.Embedding(config.vocab_size, config.n_embd),
-        wpe = nn.Embedding(config.block_size, config.n_embd),
+        wte = nn.Embedding(config.vocab_size, config.n_embd)
+        wpe = nn.Embedding(config.block_size, config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         self.wte.weight = self.lm_head.weight  # Tie embeddings
