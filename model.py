@@ -251,7 +251,7 @@ class GPT(nn.Module):
         # ---- Attention Stage ----
         for attn, norm in zip(self.attentions, self.ln_attn):
             
-            x = attn(x,rope_freqs=self.rope_freqs,c=None)
+            x = attn(x,rope_freqs=self.rope_freqs,weights=None)
             x = norm(x)
             attention_outputs.append(x)
 
