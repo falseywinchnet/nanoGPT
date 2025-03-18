@@ -186,7 +186,7 @@ class GPT(nn.Module):
         self.layers = config.n_layer
         self.t = 0
         self.freeze_mode = False
-
+        self.jumps = 0
         self.wte.weight = self.lm_head.weight  # Tie embeddings
 
         if config.use_rope:
@@ -232,20 +232,13 @@ class GPT(nn.Module):
 
     def expand_attention_heads(self):
         """Expands the number of attention heads while keeping `n_embd % n_head == 0`."""
-        new_n_head = self.find_next_valid_n_head(self.config.n_embd, self.config.n_head)
-        
-        if new_n_head == self.config.n_head:
-            print("No valid head expansion possible, keeping current head count.")
-            return
-        
-        print(f"Expanding attention heads from {self.config.n_head} to {new_n_head}...")
-        
+
         # Backup existing attention layers
         old_attentions = self.attentions
         old_head_count = self.config.n_head
     
         # Update config
-        self.config.n_head = new_n_head
+        self.config.n_head = self.config.n_head+4 
         self.attentions = nn.ModuleList([
             CausalSelfAttention(self.config) for _ in range(self.config.n_layer)
         ])
@@ -277,13 +270,14 @@ class GPT(nn.Module):
         pos = torch.arange(0, t, dtype=torch.long, device=device)
         x = self.wte(idx) + self.wpe(pos)
         self.t+=1
-        if not self.t % 500 and self.t > 0:
-            if not self.freeze_mode:
+        if not self.t % 500 and self.t > 0 and self.jumps < 4:
+            if not self.freeze_mode and self.jumps < 3:
                 self.expand_attention_heads()  # Increase by min
+                self.jumps += 1
                 for mlp in self.mlps:
                     mlp.freeze_weights()
                 self.freeze_mode = True
-            else:
+            elif self.freeze_mode:
                 for mlp in self.mlps:
                     mlp.unfreeze_weights()
                 self.freeze_mode = False
