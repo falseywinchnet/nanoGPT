@@ -229,7 +229,7 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
 
-def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None):
         b, t = idx.shape
         device = idx.device
 
