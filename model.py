@@ -255,6 +255,7 @@ class GPT(nn.Module):
         #        c = c/2
           #  else:
         #        c = None
+        
         # ---- Attention Stage ----
         for i, attn, norm,mlp in zip(range(self.layers),self.attentions, self.ln_attn,self.mlps):
             
@@ -264,7 +265,10 @@ class GPT(nn.Module):
                 residual = residual + x #seed the stage
             else:
                 residual += mlp(x)
+            q = x.clone()
             x = x + source.clone()
+            source = q.clone()
+            
         # Final norm and output
         x = self.ln_mlp(residual)
         logits = self.lm_head(x)
