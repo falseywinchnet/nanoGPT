@@ -175,21 +175,16 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
-        self.ln_x = LayerNorm(config.n_embd, bias=config.bias)
-        self.ln_y = LayerNorm(config.n_embd, bias=config.bias)
-        self.ln_R = LayerNorm(config.n_embd, bias=config.bias)
-
-        self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            drop = nn.Dropout(config.dropout),
-            residual = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias),
-        ))
-     
+        self.attentions = nn.ModuleList([CausalSelfAttention(config) for _ in range(config.n_layer)])
+        self.ln_attn = nn.ModuleList([LayerNorm(config.n_embd, bias=config.bias) for _ in range(config.n_layer)])
+        self.mlps = nn.ModuleList([MLP(config) for _ in range(config.n_layer)])
+        self.ln_mlp = LayerNorm(config.n_embd, bias=config.bias)
+        wte = nn.Embedding(config.vocab_size, config.n_embd),
+        wpe = nn.Embedding(config.block_size, config.n_embd),
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # weight tying: share the weights between the token embedding and the final output layer.
-        self.transformer.wte.weight = self.lm_head.weight
+
+        self.wte.weight = self.lm_head.weight  # Tie embeddings
+
         if config.use_rope:
             head_dim = config.n_embd // config.n_head
             self.register_buffer("rope_freqs", self._build_rope_frequencies(head_dim))
@@ -234,96 +229,49 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
 
-    def forward(
-        self,
-        idx,
-        targets=None,
-        return_features=None
-    ):
-        """
-        A single forward method that:
-          - If refinement_steps=0, just does a normal forward pass => last-position logits
-          - If refinement_steps>0, does multiple passes:
-              (a) get full-sequence logits,
-              (b) apply Gumbel-Softmax on last token => "virtual token",
-              (c) append it,
-              (d) re-run attention,
-              repeated 'refinement_steps' times,
-              then slice the final output back to the original length,
-              and optionally compute CE loss.
-          - If return_features=True, we return hidden states instead of logits.
-
-        Param:
-          idx: (b, t) integer token IDs
-          targets: (b, t) or None
-          refinement_steps: how many "dance" passes to do
-          gumbel_tau: gumbel temperature
-          hard_st: if True, use straight-through gumbel
-          return_features: override config.return_features if set
-        """
-        if return_features is None:
-            return_features = self.config.return_features
-
-        device = idx.device
-        b, original_t = idx.shape
-
-        # ---- Normal single forward pass for the given sequence ----
-        x = self._run_transformer(idx)  # shape (b, t, n_embd)
-        
-        if return_features:
-            # If we want the final hidden states:
-            return x  # shape (b, t, n_embd)
-        else:
-            # otherwise, return last-position logits by default:
-            logits = self.lm_head(x[:, -1:, :])  # (b, 1, vocab_size)
-            loss = None
-            if targets is not None:
-                # compute CE across entire seq
-                full_logits = self.lm_head(x)      # (b, t, vocab_size)
-                loss = F.cross_entropy(
-                    full_logits.view(-1, full_logits.size(-1)),
-                    targets.view(-1),
-                    ignore_index=-1
-                )
-                loss = loss  
-            return logits, loss
-
-
-    def _run_transformer(self, idx):
-        """
-        1) Convert idx -> embeddings
-        2) If override_last_embed is not None, replace the last token's embedding
-        3) (Optional) build secondary embeddings
-        4) Pass through blocks, return final hidden states (b, t, n_embd)
-        """
+def forward(self, idx, targets=None):
         b, t = idx.shape
         device = idx.device
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
-        # Standard token + position embeddings
-        tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos)
-        x = tok_emb +pos_emb
-                
-        dropout_mask = (torch.rand_like(x) > self.config.dropout).float() / (1.0 - self.config.dropout)
-        x = x * dropout_mask  
-        # Pass through each block
-        
-        for i, block in enumerate(self.transformer.residual):
-            if i > 0 and (i + 1) % 2 and i < len(self.transformer.residual) - 1:
-                weight_prev = self.transformer.residual[i - 1].attn.c_attn.weight
-                weight_next = self.transformer.residual[i + 1].attn.c_attn.weight
-                c = weight_prev + weight_next
-                c = c/2
-            else:
-                c = None
-        
-            x = block(x, rope_freqs=self.rope_freqs,c=c)
-   
+
+        pos = torch.arange(0, t, dtype=torch.long, device=device)
+        x = self.wte(idx) + self.wpe(pos)
+        x = self.dropout(x)
+
+        residual = x  # Keep initial residual state
+
+        # Store intermediate attention products
+        attention_outputs = []
+        #
+         #   if i > 0 and (i + 1) % 2 and i < len(self.transformer.residual) - 1:
+         #       weight_prev = self.transformer.residual[i - 1].attn.c_attn.weight
+         #       weight_next = self.transformer.residual[i + 1].attn.c_attn.weight
+         #       c = weight_prev + weight_next
+        #        c = c/2
+          #  else:
+        #        c = None
+        # ---- Attention Stage ----
+        for attn, norm in zip(self.attentions, self.ln_attn):
             
-        # Final layernorm
-        x = self.transformer.ln_f(x)
-        return x
-    
+            x = attn(x,rope_freqs=self.rope_freqs,c=None)
+            x = norm(x)
+            attention_outputs.append(x)
+
+        # ---- MLP Processing ----
+        for i, mlp in enumerate(self.mlps):
+            if i == 0:
+                residual = residual + attention_outputs[i]  # First residual update
+            else:
+                residual = residual + mlp(attention_outputs[i])  # Update residual at each step
+
+        # Final norm and output
+        x = self.ln_mlp(residual)
+        logits = self.lm_head(x)
+
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+
+        return logits, loss
         
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
