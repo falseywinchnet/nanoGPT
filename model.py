@@ -223,34 +223,33 @@ class GPT(nn.Module):
         return 1.0 / (
             10000 ** (torch.arange(0, half_dim, dtype=torch.float32) / half_dim)
         )
-    def find_next_valid_n_head(self,n_embd, current_n_head):
-        """Find the next valid number of attention heads that divides `n_embd`."""
-        for new_n_head in range(current_n_head + 1, n_embd + 1):
-            if n_embd % new_n_head == 0:
-                return new_n_head
-        return current_n_head  # Fallback (should never happen)
-
     def expand_attention_heads(self):
         """Expands the number of attention heads while keeping `n_embd % n_head == 0`."""
-
+        
+        # Get the current device (assuming all model parameters are on the same device)
+        device = next(self.parameters()).device
+    
         # Backup existing attention layers
         old_attentions = self.attentions
         old_head_count = self.config.n_head
     
-        # Update config
-        self.config.n_head = self.config.n_head+4 
+        # Update config: Increase heads by 4
+        self.config.n_head += 4 
+    
+        # Create new attention layers and move them to the correct device
         self.attentions = nn.ModuleList([
-            CausalSelfAttention(self.config) for _ in range(self.config.n_layer)
+            CausalSelfAttention(self.config).to(device) for _ in range(self.config.n_layer)
         ])
     
         # Copy old weights into new attention layers
         for i in range(len(self.attentions)):
-            old_weight = old_attentions[i].c_attn.weight.data.clone()
+            old_weight = old_attentions[i].c_attn.weight.data.clone().detach().to(device)
             new_weight = self.attentions[i].c_attn.weight.data
     
             # Copy over the old head weights (this is approximate)
             num_weights_to_copy = min(old_weight.shape[0], new_weight.shape[0])
-            new_weight[:num_weights_to_copy, :old_weight.shape[1]] = old_weight[:num_weights_to_copy, :]
+            new_weight[:num_weights_to_copy, :old_weight.shape[1]] = old_weight[:num_weights_to_copy, :].to(device)
+
     
     
     def _init_weights(self, module):
