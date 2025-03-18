@@ -117,43 +117,44 @@ class RainstarActivation(nn.Module):
        return (neg *torch.sigmoid(-x)) + (pos * torch.sigmoid(x)) +1
 
 class MLP(nn.Module):
-
+    """MLP with dynamic weight freezing"""
     def __init__(self, config):
         super().__init__()
+        self.config = config
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu    = RainstarActivation()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=False) #KAN style
+        self.activation = RainstarActivation()
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
         self.dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x):
-        x = self.c_fc(x)
-        x = self.gelu(x)
-        x = self.c_proj(x)
-        x = self.dropout(x)
-        return x
+        # Buffers for frozen weights (not trainable)
+        self.frozen_c_fc = None
+        self.frozen_c_proj = None
+        self.frozen = False  # Controls whether to use frozen weights
 
-class Block(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.ln_r = LayerNorm(config.n_embd, bias=config.bias)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
-        self.mlp = MLP(config)
-    
-    def forward(self, x, rope_freqs,c):
-            """
-            Iteratively apply attention and MLP with residuals over multiple steps.
-            """
-            prior = x
-            x = self.ln_1(x)
-            x = self.attn(x, rope_freqs,weights=c)
-            # --- Step 2: Compute Absolute Positional Bias ---
-            # Apply normalization and MLP (using the residual)
-            x = self.ln_2(x)
-            x = self.mlp(x)
-            posterior = x + prior
-            return posterior
+    def freeze_weights(self):
+        """Copies current weights and freezes MLP"""
+        self.frozen_c_fc = self.c_fc.weight.clone().detach()
+        self.frozen_c_proj = self.c_proj.weight.clone().detach()
+        self.frozen = True
+
+    def unfreeze_weights(self):
+        """Unfreezes MLP"""
+        self.frozen = False
+
+    def forward(self, x):
+        if self.frozen and self.frozen_c_fc is not None:
+            # Use frozen weights (no gradients)
+            x = F.linear(x, self.frozen_c_fc)
+            x = self.activation(x)
+            x = F.linear(x, self.frozen_c_proj)
+        else:
+            # Normal trainable forward
+            x = self.c_fc(x)
+            x = self.activation(x)
+            x = self.c_proj(x)
+
+        return self.dropout(x)
+
     
 @dataclass
 class GPTConfig:
@@ -183,6 +184,8 @@ class GPT(nn.Module):
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.layers = config.n_layer
+        self.t = 0
+        self.freeze_mode = False
 
         self.wte.weight = self.lm_head.weight  # Tie embeddings
 
@@ -220,7 +223,34 @@ class GPT(nn.Module):
         return 1.0 / (
             10000 ** (torch.arange(0, half_dim, dtype=torch.float32) / half_dim)
         )
-        
+    def expand_attention_heads(self, new_heads):
+        """
+        Expands the number of attention heads while preserving old ones.
+        """
+        print(f"Expanding attention heads from {self.config.n_head} to {new_heads}...")
+    
+        # Step 1: Backup existing attention weights
+        old_attentions = self.attentions
+        old_head_count = self.config.n_head
+    
+        # Step 2: Create new attention layers with more heads
+        self.config.n_head = new_heads
+        self.attentions = nn.ModuleList([
+            CausalSelfAttention(self.config) for _ in range(self.config.n_layer)
+        ])
+    
+        # Step 3: Copy old weights into new attention heads
+        for i in range(len(self.attentions)):
+            old_weight = old_attentions[i].c_attn.weight.data.clone()
+            new_weight = self.attentions[i].c_attn.weight.data
+    
+            # Copy the old heads into the new matrix
+            new_weight[:old_weight.shape[0], :old_weight.shape[1]] = old_weight
+    
+        print(f"New attention heads added. Model will now train with {new_heads} heads.")
+
+
+    
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -236,7 +266,19 @@ class GPT(nn.Module):
 
         pos = torch.arange(0, t, dtype=torch.long, device=device)
         x = self.wte(idx) + self.wpe(pos)
+        self.t+=1
+        if not self.t % 500 and self.t > 0:
+            if not self.freeze_mode:
+                self.expand_attention_heads(self.config.n_head + 4)  # Increase by 4 heads
+                for mlp in self.mlps:
+                    mlp.freeze_weights()
+                self.freeze_mode = True
+            else:
+                for mlp in self.mlps:
+                    mlp.unfreeze_weights()
+                self.freeze_mode = False
 
+        
         residual = x  # Keep initial residual state
 
         # Store intermediate attention products
