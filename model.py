@@ -249,6 +249,15 @@ class GPT(nn.Module):
             # Copy over the old head weights (this is approximate)
             num_weights_to_copy = min(old_weight.shape[0], new_weight.shape[0])
             new_weight[:num_weights_to_copy, :old_weight.shape[1]] = old_weight[:num_weights_to_copy, :].to(device)
+            # ---- Recompute RoPE Frequencies ----
+            head_dim = self.config.n_embd // self.config.n_head  # Update head dimension
+            new_rope_freqs = self._build_rope_frequencies(head_dim).to(device)
+        
+            # Safely replace the buffer
+            if hasattr(self, "rope_freqs"):
+                del self.rope_freqs  # Remove old buffer to prevent conflicts
+        
+            self.register_buffer("rope_freqs", new_rope_freqs)
 
     
     
