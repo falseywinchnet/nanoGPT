@@ -203,9 +203,9 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
         self.attentions = nn.ModuleList([CausalSelfAttention(config) for _ in range(config.n_layer)])
-        self.ln_attn = nn.ModuleList([QNorm(config.n_embd, bias=True) for _ in range(config.n_layer)])
+        self.ln_attn = nn.ModuleList([LayerNorm(config.n_embd, bias=True) for _ in range(config.n_layer)])
         self.mlps = nn.ModuleList([MLP(config) for _ in range(config.n_layer)])
-        self.ln_mlp = QNorm(config.n_embd, bias=True)
+        self.ln_mlp = LayerNorm(config.n_embd, bias=True)
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
