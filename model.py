@@ -287,7 +287,7 @@ class GPT(nn.Module):
             
             xn = attn(x,rope_freqs=self.rope_freqs,weights=None)
             x = norm(x+prev)
-            prev = xn.copy()
+            prev = xn.copy_()
             residual += mlp(x)
 
         # Final norm and output
