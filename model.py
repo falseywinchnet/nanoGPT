@@ -21,6 +21,27 @@ class LayerNorm(nn.Module):
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
+class RainstarActivation(nn.Module):
+    def __init__(self, gammaval=8):
+        super().__init__()
+        self.sil = nn.SiLU()
+    def forward(self, x):
+       neg =  self.sil(x) * (x*torch.sigmoid(x)) + x/(1+torch.abs(x))
+       pos =  x -  x/(1+torch.abs(x))
+       return (neg *torch.sigmoid(-x)) + (pos * torch.sigmoid(x)) +1
+        
+class ReferenceActivation(nn.Module):
+    def __init__(self, gamma=24):
+        super().__init__()
+
+    def forward(self, x):
+    
+        # Step 2: Process (your transformation)
+        log_x = torch.sign(x) * torch.log1p(torch.abs(x))
+        processed = log_x / torch.sqrt(1 + 24 * log_x ** 2)
+
+        return processed
+
 class QNorm(nn.Module):
     ''' Inspired by Softsign and DTanh '''
     def __init__(self, ndim, bias=True):
@@ -31,8 +52,9 @@ class QNorm(nn.Module):
             self.b = nn.Parameter(torch.zeros(ndim))
         else:
             self.register_buffer("b", torch.zeros(ndim))
+        self.f = ReferenceActivation()
     def forward(self, x):
-        return self.g * x/(1 + self.a*torch.abs(x)) + self.b
+        return self.g * self.f(self.a*x) + self.b
         
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -119,14 +141,6 @@ class CausalSelfAttention(nn.Module):
         y = self.resid_dropout(self.c_proj(y))
         return y
 
-class RainstarActivation(nn.Module):
-    def __init__(self, gammaval=8):
-        super().__init__()
-        self.sil = nn.SiLU()
-    def forward(self, x):
-       neg =  self.sil(x) * (x*torch.sigmoid(x)) + x/(1+torch.abs(x))
-       pos =  x -  x/(1+torch.abs(x))
-       return (neg *torch.sigmoid(-x)) + (pos * torch.sigmoid(x)) +1
 
 class MLP(nn.Module):
     """MLP with dynamic weight freezing"""
@@ -256,7 +270,7 @@ class GPT(nn.Module):
         x = self.wte(idx) + self.wpe(pos)
         
         residual = x  # Keep initial residual state
-        source = x
+        prev = x
         # Store intermediate attention products
         attention_outputs = []
         #
@@ -271,12 +285,10 @@ class GPT(nn.Module):
         # ---- Attention Stage ----
         for i, attn, norm,mlp in zip(range(self.layers),self.attentions, self.ln_attn,self.mlps):
             
-            x = attn(x,rope_freqs=self.rope_freqs,weights=None)
-            x = norm(x)
-            if i == 0:
-                residual = residual + x #seed the stage
-            else:
-                residual += mlp(x)
+            xn = attn(x,rope_freqs=self.rope_freqs,weights=None)\
+            x = norm(x+prev)
+            prev = xn.copy()
+            residual += mlp(x)
 
         # Final norm and output
         x = self.ln_mlp(residual)
