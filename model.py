@@ -21,7 +21,19 @@ class LayerNorm(nn.Module):
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
-
+class QNorm(nn.Module):
+    ''' Inspired by Softsign and DTanh '''
+    def __init__(self, ndim, bias=True):
+        super().__init__()
+        self.a = nn.Parameter(torch.ones(1) * 0.5)
+        self.g = nn.Parameter(torch.ones(ndim))
+        if bias:
+            self.b = nn.Parameter(torch.zeros(ndim))
+        else:
+            self.register_buffer("b", torch.zeros(ndim))
+    def forward(self, x):
+        return self.g * x/(1 + self.a*torch.abs(x)) + self.b
+        
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -177,9 +189,9 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
         self.attentions = nn.ModuleList([CausalSelfAttention(config) for _ in range(config.n_layer)])
-        self.ln_attn = nn.ModuleList([LayerNorm(config.n_embd, bias=config.bias) for _ in range(config.n_layer)])
+        self.ln_attn = nn.ModuleList([QNorm(config.n_embd, bias=True) for _ in range(config.n_layer)])
         self.mlps = nn.ModuleList([MLP(config) for _ in range(config.n_layer)])
-        self.ln_mlp = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_mlp = QNorm(config.n_embd, bias=True)
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
