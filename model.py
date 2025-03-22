@@ -269,19 +269,21 @@ class GPT(nn.Module):
           #  else:
         #        c = None
         x = self.prelude(x,rope_freqs=self.rope_freqs,weights=None)
+        print(x.shape)
         residual = residual + x
         q = residual.clone()
         x_stack = torch.cat([x, -x.flip(dims=[1])], dim=1)  # Stack original + time-reversed negated version
         x_1 = torch.stack([x_stack[:, :T] + x_stack[:, T:], 
                    x_stack[:, :T] - x_stack[:, T:]], dim=0)  # (2, B, T, C)
-
+        print(x_1.shape)
                           
         # ---- Attention Stage ----
         for stage in range(6):
             e = 2 ** (stage + 1)
             q = T // e
-
+            print(e,stage,q)
             x_1 = x_1.view(e // 2, B, 2 * q, C)
+            
 
             x_first = x_1[:, :, :q, :]
             x_second = x_1[:, :, q:, :]
@@ -294,7 +296,7 @@ class GPT(nn.Module):
             bottom = x_first - x_attn
 
             x_1 = torch.cat([top, bottom], dim=0)  # (e, B, q, C)
-
+        print(x_1.shape)
         # Final reshape and slice
         x_final = x_1.view(B, 2 * T, C)[:, :T, :]
 
