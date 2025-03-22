@@ -189,7 +189,7 @@ class GPT(nn.Module):
         self.coda =    MLP(config)
         self.initial = MLP(config)
 
-        self.attentions = nn.ModuleList([CausalSelfAttention(config) for _ in range(config.n_layer))])
+        self.attentions = nn.ModuleList([CausalSelfAttention(config) for _ in range(config.n_layer)])
         self.mlps = nn.ModuleList([MLP(config) for _ in range(config.n_layer)])
         self.ln_mlp = LayerNorm(config.n_embd, bias=True)
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
