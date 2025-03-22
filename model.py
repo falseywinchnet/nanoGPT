@@ -258,6 +258,8 @@ class GPT(nn.Module):
         residual = x.clone()
         x = self.prelude(x, rope_freqs=self.rope_freqs, weights=None)
         residual = residual + x
+        q = x.clone()
+
         
         x_stack = torch.cat([x, -x.flip(dims=[1])], dim=1)
         x_first_half = x_stack[:, :T]
@@ -357,6 +359,8 @@ class GPT(nn.Module):
         
         # Final processing
         x_final = x_1[0]
+        residual = residual + self.initial(q)
+
         residual = residual + self.coda(x_final)
         x = self.ln_mlp(residual)
         logits = self.lm_head(x)
