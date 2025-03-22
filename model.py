@@ -270,7 +270,7 @@ class GPT(nn.Module):
         #        c = None
         x = self.prelude(x,rope_freqs=self.rope_freqs,weights=None)
         residual = residual + x
-        q = residual.copy()
+        q = residual.clone()
         # ---- Attention Stage ----
         for attn in self.attentions:
                 xn = x.clone()
