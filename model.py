@@ -247,7 +247,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-
+    import math
     def forward(self, idx, targets=None):
         B, T = idx.shape
         device = idx.device
@@ -278,7 +278,7 @@ class GPT(nn.Module):
         print(x_1.shape)
                           
         # ---- Attention Stage ----
-        for stage in range(torch.log2(T)):  # up to log2(T)
+        for stage in range(math.log2(T)):  # up to log2(T)
             e = 2 ** stage
             q = T // (2 * e)
         
