@@ -249,11 +249,12 @@ class GPT(nn.Module):
 
 
     def forward(self, idx, targets=None):
-        b, T = idx.shape
+        B, T = idx.shape
         device = idx.device
 
         pos = torch.arange(0, T, dtype=torch.long, device=device)
         x = self.wte(idx) + self.wpe(pos)
+        C = x.shape[-1] #get num chanz
         
         residual = x  # Keep initial residual state
         prev = x
