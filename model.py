@@ -289,7 +289,7 @@ class GPT(nn.Module):
 
         residual = residual + self.initial(q)
 
-        residual = residual + self.coda(x_final)
+        residual = residual + self.coda(x)
         x = self.ln_mlp(residual)
         logits = self.lm_head(x)
         
