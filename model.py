@@ -270,7 +270,6 @@ class GPT(nn.Module):
             prev = torch.fft.irfft(X, n=T, dim=-1)
             x = attn(x + prev, rope_freqs=self.rope_freqs, weights=None)
             # Store into prev
-            prev = xn_filtered
         
 
         residual = residual + self.coda(x)
