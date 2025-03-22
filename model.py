@@ -270,8 +270,8 @@ class GPT(nn.Module):
         
             # Apply crude ramp filter in frequency domain
             T = xn.shape[-1]
-            F = X.shape[-1]  # This is T//2 + 1
-            r = torch.linspace(0, 1.0, F, device=X.device).reshape([1]* (X.ndim - 1) + [F])
+            S = X.shape[-1]  # This is T//2 + 1
+            r = torch.linspace(0, 1.0, S, device=X.device).reshape([1]* (X.ndim - 1) + [S])
             X *= r  # Apply the ramp across the frequency axis
         
             xn_filtered = torch.fft.irfft(X, n=T, dim=-1)
