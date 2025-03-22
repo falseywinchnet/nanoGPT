@@ -272,29 +272,53 @@ class GPT(nn.Module):
         print(x.shape)
         residual = residual + x
         q = residual.clone()
-        x_stack = torch.cat([x, -x.flip(dims=[1])], dim=1)  # Stack original + time-reversed negated version
-        x_1 = torch.stack([x_stack[:, :T] + x_stack[:, T:], 
-                   x_stack[:, :T] - x_stack[:, T:]], dim=0)  # (2, B, T, C)
-        print(x_1.shape)
+
+        # Step 1: Build initial butterfly input
+        x_stack = torch.cat([x, -x.flip(dims=[1])], dim=1)  # (B, 2T, C)
+        x_first_half = x_stack[:, :T]
+        x_second_half = x_stack[:, T:]
+        
+        x_1 = torch.stack([
+            x_first_half + x_second_half,
+            x_first_half - x_second_half
+        ], dim=0)  # Shape: (2, B, T, C)
+        
+        # Step 2: Manually handle first stage → no reshape needed
         e = 2
         q = T // e
-        x_1 = x_1.view(e, B, q, C)                  
-        # ---- Attention Stage ----
-        for stage in range(1,int(math.log2(T))):  # up to log2(T)
-            e = 2 ** stage
-            q = T // (2 * e)
         
-            x_1 = x_1.view(e, B, 2 * q, C)
+        # Split along the time axis (dim=2), then process second half
+        x_first = x_1[:, :, :q, :]
+        x_second = x_1[:, :, q:, :]
+        
+        x_attn = self.attentions[0](x_second.reshape(-1, q, C))
+        x_attn = x_attn.reshape(e, B, q, C)
+        
+        top = x_first + x_attn
+        bottom = x_first - x_attn
+        
+        x_1 = torch.cat([top, bottom], dim=0)  # Now shape: (4, B, q, C)
+        
+        # Step 3: Butterfly loop
+        num_stages = int(math.log2(T))
+        for stage in range(1, num_stages):
+            e = 2 ** (stage + 1)
+            q = T // e  # q halves each stage
+        
+            # Combine adjacent pairs of rows into shape (e//2, B, 2q, C)
+            x_1 = x_1.reshape(e // 2, B, 2 * q, C)
+        
             x_first = x_1[:, :, :q, :]
             x_second = x_1[:, :, q:, :]
         
-            x_attn = self.attentions[stage](x_second.view(-1, q, C))
-            x_attn = x_attn.view(e, B, q, C)
+            x_attn = self.attentions[stage](x_second.reshape(-1, q, C))
+            x_attn = x_attn.reshape(e // 2, B, q, C)
         
             top = x_first + x_attn
             bottom = x_first - x_attn
         
-            x_1 = torch.cat([top, bottom], dim=0)  # (2e, B, q, C)
+            x_1 = torch.cat([top, bottom], dim=0)  # shape: (e, B, q, C)
+
 
         print(x_1.shape)
         # Final reshape and slice
