@@ -274,11 +274,10 @@ class GPT(nn.Module):
                 xn = x.clone()
                 x = attn(x+prev,rope_freqs=self.rope_freqs,weights=None)
                 prev = xn
-                if self.t <1000:
-                   residual = residual+ mlp(x)
+                if i==1:
+                   residual = residual+ mlp[0](x)
 
-        if self.t => 1000:
-            residual = residual + self.mlps[-1](x)
+        residual = residual + self.mlps[-1](x)
 
         # Final norm and output
         x = self.ln_mlp(residual)
