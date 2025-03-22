@@ -276,7 +276,7 @@ class GPT(nn.Module):
 
                           
         # ---- Attention Stage ----
-        for stage in range(depth):
+        for stage in range(6):
             e = 2 ** (stage + 1)
             q = T // e
         
