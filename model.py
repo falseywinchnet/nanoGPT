@@ -257,14 +257,14 @@ class GPT(nn.Module):
         prev=x.clone()
         x = self.prelude(x, rope_freqs=self.rope_freqs, weights=None)
         residual = residual + x
-        q = x.clone()
 
         progressive_cut = 0.5  # start by cutting the first 50%
         cut_fraction = progressive_cut
         
-        for i, attn in enumerate(self.attentions[1:]):
+        for i, attn, mlp in zip(range(self.layers),self.attentions,self.mlps):
             xn = x.clone()
             x = attn(x + prev, rope_freqs=self.rope_freqs, weights=None)
+            residual = residual + mlp(x)
         
             # FFT on time axis (assume last dim is time)
             X = torch.fft.rfft(xn, dim=-1)
@@ -284,10 +284,6 @@ class GPT(nn.Module):
         
             # On next iteration, cut even more of the low-end: add another half of remainder
             cut_fraction += (1.0 - cut_fraction) * 0.5  # geometric growth toward 1.0
-
-
-
-        residual = residual + self.initial(q)
 
         residual = residual + self.coda(x)
         x = self.ln_mlp(residual)
