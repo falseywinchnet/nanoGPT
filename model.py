@@ -246,7 +246,6 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    import math
     def forward(self, idx, targets=None):
         B, T = idx.shape
         device = idx.device
