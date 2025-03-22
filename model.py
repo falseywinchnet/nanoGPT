@@ -280,26 +280,23 @@ class GPT(nn.Module):
         for stage in range(6):
             e = 2 ** (stage + 1)
             q = T // e
-        
-            # x_1: shape (e//2, B, 2q, C) → split into halves
-            x_1 = x_1.view(e, B, q, C)
-        
+
+            x_1 = x_1.view(e // 2, B, 2 * q, C)
+
             x_first = x_1[:, :, :q, :]
             x_second = x_1[:, :, q:, :]
-        
-            # Attention over the latter half
-            x_attn = self.attentions[stage](x_second.view(-1, q, C))  # flatten across batch/e
-            x_attn = x_attn.view(e//2, B, q, C)
-        
-            # Combine with first half
+
+            # Attention over x_second
+            x_attn = self.attentions[stage](x_second.view(-1, q, C))  # (e//2 * B, q, C)
+            x_attn = x_attn.view(e // 2, B, q, C)
+
             top = x_first + x_attn
             bottom = x_first - x_attn
-        
-            # Stack next stage
+
             x_1 = torch.cat([top, bottom], dim=0)  # (e, B, q, C)
-        
+
         # Final reshape and slice
-        x_final = x_1.view(B, 2*T, C)[:, :T, :]
+        x_final = x_1.view(B, 2 * T, C)[:, :T, :]
 
         
         residual = residual+ self.initial(q)
