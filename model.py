@@ -248,95 +248,81 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     import math
+
     def forward(self, idx, targets=None):
         B, T = idx.shape
         device = idx.device
-
+        C = self.config.n_embd  # or x.shape[-1] after embedding
+    
+        # Step 1: Standard embeddings
         pos = torch.arange(0, T, dtype=torch.long, device=device)
-        x = self.wte(idx) + self.wpe(pos)
-        C = x.shape[-1] #get num chanz
-        
-        residual = x  # Keep initial residual state
-        prev = x
-        # Store intermediate attention products
-        attention_outputs = []
-        #
-         #   if i > 0 and (i + 1) % 2 and i < len(self.transformer.residual) - 1:
-         #       weight_prev = self.transformer.residual[i - 1].attn.c_attn.weight
-         #       weight_next = self.transformer.residual[i + 1].attn.c_attn.weight
-         #       c = weight_prev + weight_next
-        #        c = c/2
-          #  else:
-        #        c = None
-        x = self.prelude(x,rope_freqs=self.rope_freqs,weights=None)
-        print(x.shape)
+        x = self.wte(idx) + self.wpe(pos)         # (B, T, C)
+        residual = x.clone()
+    
+        # Step 2: Prelude attention (if you have a "prelude" module)
+        x = self.prelude(x, rope_freqs=self.rope_freqs, weights=None)
         residual = residual + x
-        q = residual.clone()
-
-        # Step 1: Build initial butterfly input
+    
+        # Step 3: Build initial shape => (2, B, T, C)
         x_stack = torch.cat([x, -x.flip(dims=[1])], dim=1)  # (B, 2T, C)
-        x_first_half = x_stack[:, :T]
-        x_second_half = x_stack[:, T:]
-        
+        x_first_half = x_stack[:, :T]                       # (B, T, C)
+        x_second_half = x_stack[:, T:]                      # (B, T, C)
         x_1 = torch.stack([
-            x_first_half + x_second_half,
+            x_first_half + x_second_half,  
             x_first_half - x_second_half
-        ], dim=0)  # Shape: (2, B, T, C)
-        
-        # Step 2: Manually handle first stage → no reshape needed
-        e = 2
-        q = T // e
-        
-        # Split along the time axis (dim=2), then process second half
-        x_first = x_1[:, :, :q, :]
-        x_second = x_1[:, :, q:, :]
-        
-        x_attn = self.attentions[0](x_second.reshape(-1, q, C))
-        x_attn = x_attn.reshape(e, B, q, C)
-        
-        top = x_first + x_attn
-        bottom = x_first - x_attn
-        
-        x_1 = torch.cat([top, bottom], dim=0)  # Now shape: (4, B, q, C)
-        
-        # Step 3: Butterfly loop
+        ], dim=0)  # shape (2, B, T, C)
+    
+        # Guarantee T is a power of 2:
         num_stages = int(math.log2(T))
-        for stage in range(1, num_stages):
-            e = 2 ** (stage + 1)
-            q = T // e  # q halves each stage
-        
-            # Combine adjacent pairs of rows into shape (e//2, B, 2q, C)
-            x_1 = x_1.reshape(e // 2, B, 2 * q, C)
-        
-            x_first = x_1[:, :, :q, :]
-            x_second = x_1[:, :, q:, :]
-        
-            x_attn = self.attentions[stage](x_second.reshape(-1, q, C))
-            x_attn = x_attn.reshape(e // 2, B, q, C)
-        
-            top = x_first + x_attn
+        assert 2 ** num_stages == T, "Sequence length must be a power of 2"
+    
+        # ---- Butterfly Stages ----
+        # shape evolves from (2, B, T, C) → (4, B, T/2, C) → (8, B, T/4, C) → ... → (T, B, 1, C)
+        for s in range(num_stages):
+            # At stage s, x_1 has shape (2^s, B, T/2^s, C)
+            e = 2 ** s                 # the first dimension
+            time_now = T // (2 ** s)   # the "time" dimension
+            half_time = time_now // 2
+    
+            # 1) Reshape explicitly if needed (just for clarity)
+            x_1 = x_1.reshape(e, B, time_now, C)    # no change in total elements
+    
+            # 2) Split time dimension
+            x_first = x_1[:, :, :half_time, :]      # shape (e, B, half_time, C)
+            x_second = x_1[:, :, half_time:, :]     # shape (e, B, half_time, C)
+    
+            # 3) Attention over x_second
+            x_attn = self.attentions[s](           # use stage s
+                x_second.reshape(e * B, half_time, C)
+            )
+            x_attn = x_attn.reshape(e, B, half_time, C)
+    
+            # 4) Combine
+            top    = x_first + x_attn
             bottom = x_first - x_attn
-        
-            x_1 = torch.cat([top, bottom], dim=0)  # shape: (e, B, q, C)
-
-
-        print(x_1.shape)
-        # Final reshape and slice
-        x_final = x_1.view(B, 2 * T, C)[:, :T, :]
-
-        
-        residual = residual+ self.initial(q)
+    
+            # 5) Concatenate along the first dimension => doubles it from e → 2e
+            x_1 = torch.cat([top, bottom], dim=0)   # shape = (2e, B, half_time, C)
+    
+        # After the loop: shape is (T, B, 1, C)
+        # => reshape to (B, T, C)
+        x_final = x_1.reshape(B, T, C)
+    
+        # Optionally do coda, final LN, etc:
         residual = residual + self.coda(x_final)
-
-        # Final norm and output
         x = self.ln_mlp(residual)
         logits = self.lm_head(x)
-
+    
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
-
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), 
+                targets.view(-1), 
+                ignore_index=-1
+            )
+    
         return logits, loss
+
         
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
