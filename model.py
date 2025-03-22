@@ -276,9 +276,11 @@ class GPT(nn.Module):
         x_1 = torch.stack([x_stack[:, :T] + x_stack[:, T:], 
                    x_stack[:, :T] - x_stack[:, T:]], dim=0)  # (2, B, T, C)
         print(x_1.shape)
-                          
+        e = 2
+        q = T // e
+        x_1 = x_1.view(e, B, q, C)                  
         # ---- Attention Stage ----
-        for stage in range(int(math.log2(T))):  # up to log2(T)
+        for stage in range(1,int(math.log2(T))):  # up to log2(T)
             e = 2 ** stage
             q = T // (2 * e)
         
