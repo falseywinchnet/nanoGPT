@@ -271,7 +271,8 @@ class GPT(nn.Module):
         residual = residual + x
         q = residual.clone()
         x_stack = torch.cat([x, -x.flip(dims=[1])], dim=1)  # Stack original + time-reversed negated version
-        x_1 = torch.stack([x[:, :T] + x[:, T:], x[:, :T] - x[:, T:]], dim=0)  # Shape: (2, B, T, C)
+        x_1 = torch.stack([x_stack[:, :T] + x_stack[:, T:], 
+                   x_stack[:, :T] - x_stack[:, T:]], dim=0)  # (2, B, T, C)
 
                           
         # ---- Attention Stage ----
