@@ -30,32 +30,6 @@ class RainstarActivation(nn.Module):
        pos =  x -  x/(1+torch.abs(x))
        return (neg *torch.sigmoid(-x)) + (pos * torch.sigmoid(x)) +1
         
-class ReferenceActivation(nn.Module):
-    def __init__(self, gamma=24):
-        super().__init__()
-
-    def forward(self, x):
-    
-        # Step 2: Process (your transformation)
-        log_x = torch.sign(x) * torch.log1p(torch.abs(x))
-        processed = log_x / torch.sqrt(1 + 24 * log_x ** 2)
-
-        return processed
-
-class QNorm(nn.Module):
-    ''' Inspired by Softsign and DTanh '''
-    def __init__(self, ndim, bias=True):
-        super().__init__()
-        self.a = nn.Parameter(torch.ones(1) * 0.5)
-        self.g = nn.Parameter(torch.ones(ndim))
-        if bias:
-            self.b = nn.Parameter(torch.zeros(ndim))
-        else:
-            self.register_buffer("b", torch.zeros(ndim))
-        self.f = ReferenceActivation()
-    def forward(self, x):
-        return self.g * self.f(self.a*x) + self.b
-        
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -66,50 +40,60 @@ class CausalSelfAttention(nn.Module):
         self.flash = hasattr(F, 'scaled_dot_product_attention')
         self.use_rope = config.use_rope
         self.noise_alpha = config.noise_alpha
-        
+        self.norm = LayerNorm(config.n_embd, bias=True)
 
         # ---- Primary Q,K,V ----
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-
-        # Output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.abs_pos_embedding = nn.Parameter(torch.zeros(1, config.n_head, config.block_size, config.block_size))
 
-        # Dropouts
+        self.abs_pos_embedding = nn.Parameter(torch.zeros(1, config.n_head, config.block_size, config.block_size))
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
-        
+
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
+        # Freezing machinery
+        self.frozen = False
+        self.frozen_c_attn = None
+        self.frozen_c_proj = None
+
+    def freeze_weights(self):
+        self.frozen_c_attn = self.c_attn.weight.clone().detach()
+        self.frozen_c_proj = self.c_proj.weight.clone().detach()
+        self.frozen = True
+
+    def unfreeze_weights(self):
+        self.frozen = False
 
     def apply_rope(self, q, k):
-        """Applies RoPE to queries and keys."""
         B, H, S, D = q.shape
         rope_freqs = self.rope_freqs.to(q.device, q.dtype)
         positions = torch.arange(S, device=q.device, dtype=q.dtype).unsqueeze(1)
-        theta = positions * rope_freqs.unsqueeze(0)  # shape [S, D/2]
+        theta = positions * rope_freqs.unsqueeze(0)
         sin_theta, cos_theta = theta.sin(), theta.cos()
-
         sin_theta = sin_theta.expand(B, H, S, D // 2)
         cos_theta = cos_theta.expand(B, H, S, D // 2)
 
         q1, q2 = q[..., 0::2], q[..., 1::2]
         k1, k2 = k[..., 0::2], k[..., 1::2]
-        q = torch.cat([q1*cos_theta - q2*sin_theta, q1*sin_theta + q2*cos_theta], dim=-1)
-        k = torch.cat([k1*cos_theta - k2*sin_theta, k1*sin_theta + k2*cos_theta], dim=-1)
+        q = torch.cat([q1 * cos_theta - q2 * sin_theta, q1 * sin_theta + q2 * cos_theta], dim=-1)
+        k = torch.cat([k1 * cos_theta - k2 * sin_theta, k1 * sin_theta + k2 * cos_theta], dim=-1)
         return q, k
-        
 
     def forward(self, x, rope_freqs=None, weights=None):
-
-
         B, T, C = x.size()
-        weight = weights if weights is not None else self.c_attn.weight
-        q, k, v = F.linear(x, weight).split(self.n_embd, dim=2)
 
+        # Use frozen weights if set
+        if self.frozen and self.frozen_c_attn is not None:
+            qkv = F.linear(x, self.frozen_c_attn)
+        else:
+            weight = weights if weights is not None else self.c_attn.weight
+            qkv = F.linear(x, weight)
+
+        q, k, v = qkv.split(self.n_embd, dim=2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
@@ -118,28 +102,27 @@ class CausalSelfAttention(nn.Module):
             self.rope_freqs = rope_freqs
             q, k = self.apply_rope(q, k)
 
-                
-        # Compute attention for the primary embedding
         if self.flash:
             y = F.scaled_dot_product_attention(q, k, v, attn_mask=None,
                         dropout_p=self.dropout if self.training else 0, is_causal=True)
-                
         else:
             print("Nope not today!")
             att_scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            position_scores = self.compute_positional_scores(x.shape[1]).to(x.device)  # (T, T) fixed position bias
+            position_scores = self.compute_positional_scores(x.shape[1]).to(x.device)
             att_scores = att_scores.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-
             att_probs = F.softmax(att_scores, dim=-1)
             att_probs = self.attn_dropout(att_probs)
-            att_pos = att_probs @ v
-            y = att_pos 
+            y = att_probs @ v
 
-        # Reshape
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        # Output projection
-        y = self.resid_dropout(self.c_proj(y))
-        return y
+
+        if self.frozen and self.frozen_c_proj is not None:
+            y = F.linear(y, self.frozen_c_proj)
+        else:
+            y = self.c_proj(y)
+
+        return self.norm(self.resid_dropout(y))
+
 
 
 class MLP(nn.Module):
@@ -203,7 +186,6 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
         self.attentions = nn.ModuleList([CausalSelfAttention(config) for _ in range(config.n_layer)])
-        self.ln_attn = nn.ModuleList([LayerNorm(config.n_embd, bias=True) for _ in range(config.n_layer)])
         self.mlps = nn.ModuleList([MLP(config) for _ in range(config.n_layer)])
         self.ln_mlp = LayerNorm(config.n_embd, bias=True)
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
@@ -265,6 +247,7 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None):
         b, t = idx.shape
         device = idx.device
+        self.t = self.t + 1
 
         pos = torch.arange(0, t, dtype=torch.long, device=device)
         x = self.wte(idx) + self.wpe(pos)
@@ -283,18 +266,19 @@ class GPT(nn.Module):
         #        c = None
         
         # ---- Attention Stage ----
-        for i, attn, norm,mlp in zip(range(self.layers),self.attentions, self.ln_attn,self.mlps):
+        for i, attn, mlp in zip(range(self.layers),self.attentions, self.mlps):
             if i ==0:
                 x = attn(x,rope_freqs=self.rope_freqs,weights=None)
-                x = norm(x)
                 residual = residual + x
             else:
                 xn = x.clone()
                 x = attn(x+prev,rope_freqs=self.rope_freqs,weights=None)
-                x = norm(x)
                 prev = xn
-                residual = residual+ mlp(x)
+                if self.t <1000:
+                   residual = residual+ mlp(x)
 
+        if self.t => 1000:
+            residual = residual + self.mlps[-1](x)
 
         # Final norm and output
         x = self.ln_mlp(residual)
