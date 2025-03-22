@@ -270,24 +270,23 @@ class GPT(nn.Module):
         num_stages = int(math.log2(T))
         assert 2 ** num_stages == T, "Sequence length must be a power of 2"
         
-        # Store skip connections for each stage
+        # Store skip connections with their stage info
         skip_connections = []
         
         # Forward butterfly stages
         for s in range(num_stages):
-            current_first_dim = 2 << s
-            current_time_dim = T >> s
+            current_first_dim = 2 << s         # 2, 4, 8, etc.
+            current_time_dim = T >> s          # T, T/2, T/4, etc.
             half_time = current_time_dim // 2
             
             # Split time dimension
             x_first = x_1[:, :, :half_time, :]
             x_second = x_1[:, :, half_time:, :]
             
-            # Store x_second for skip connection
-            skip_connections.append(x_second.clone())
+            # Store x_second for skip connection with stage info
+            skip_connections.append((x_second.clone(), s))
             
-            # Apply attention while preserving segmentation
-            # Flatten first two dims to group segments by batch
+            # Apply attention
             x_second_flat = x_second.reshape(current_first_dim * B, half_time, C)
             x_attn = self.attentions[s](x_second_flat)
             x_attn = x_attn.reshape(current_first_dim, B, half_time, C)
@@ -301,23 +300,52 @@ class GPT(nn.Module):
         
         # Inverse butterfly stages
         for s in range(num_stages-1, -1, -1):
-            current_first_dim = 2 << (s+1)
-            current_time_dim = T >> (s+1)
+            current_first_dim = 2 << (s+1)     # 2*T, T, T/2, etc.
+            current_time_dim = T >> (s+1)      # 1, 2, 4, etc.
             
             # Split the first dimension in half
-            half_dim = current_first_dim // 2
+            half_dim = current_first_dim // 2  # T, T/2, T/4, etc.
             x_top = x_1[:half_dim]
             x_bottom = x_1[half_dim:]
             
-            # Get difference between top and bottom for attention
-            x_diff = x_top - x_bottom
+            # Get difference
+            x_diff = x_top - x_bottom          # shape (half_dim, B, current_time_dim, C)
             
-            # Add skip connection from corresponding forward stage
-            # This preserves the segmentation pattern
-            skip = skip_connections[-(s+1)]
+            # Get corresponding skip connection
+            skip, fwd_stage = skip_connections[-(s+1)]
+            
+            # For debugging, print shapes
+            print(f"Stage {s}, x_diff shape: {x_diff.shape}, skip shape: {skip.shape}")
+            
+            # We need to match shapes for skip connection
+            # In forward pass at stage s, we had shape (2^(s+1), B, T/(2^s)/2, C)
+            # In inverse pass at stage s, we have shape (2^(s+1), B, T/(2^(s+1)), C)
+            # So we need to adjust skip's shape
+            
+            # The correct shape transformation: 
+            # Forward skip from stage s has shape (2^(s+1), B, T/(2^s)/2, C)
+            # Inverse stage s needs shape (2^(s+1), B, T/(2^(s+1)), C)
+            
+            # Reshape skip to match x_diff's shape
+            fwd_first_dim = 2 << fwd_stage             # Forward stage first dimension
+            fwd_time_dim = T >> fwd_stage              # Forward stage time dimension
+            fwd_half_time = fwd_time_dim // 2
+            
+            # If we're dealing with different shapes, reshape appropriately
+            if fwd_first_dim != half_dim or fwd_half_time != current_time_dim:
+                # Create a new tensor with the right shape filled with skip's data
+                # This handles the butterfly pattern's changing dimensions
+                skip_adjusted = torch.zeros_like(x_diff)
+                # Copy data from skip to skip_adjusted
+                min_first_dim = min(fwd_first_dim, half_dim)
+                min_time_dim = min(fwd_half_time, current_time_dim)
+                skip_adjusted[:min_first_dim, :, :min_time_dim, :] = skip[:min_first_dim, :, :min_time_dim, :]
+                skip = skip_adjusted
+            
+            # Now add the skip connection
             x_diff = x_diff + skip
             
-            # Apply attention while preserving segmentation
+            # Apply attention
             x_diff_flat = x_diff.reshape(half_dim * B, current_time_dim, C)
             x_diff_attn = self.attn_rev[s](x_diff_flat)
             x_diff_attn = x_diff_attn.reshape(half_dim, B, current_time_dim, C)
