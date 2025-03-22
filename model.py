@@ -188,7 +188,6 @@ class GPT(nn.Module):
         self.prelude = CausalSelfAttention(config) 
         self.coda =    MLP(config)
         self.initial = MLP(config)
-        self.attn_rev = nn.ModuleList([CausalSelfAttention(config) for _ in range(8)])
 
         self.attentions = nn.ModuleList([CausalSelfAttention(config) for _ in range(8)])
         self.mlps = nn.ModuleList([MLP(config) for _ in range(config.n_layer)])
@@ -255,6 +254,7 @@ class GPT(nn.Module):
         pos = torch.arange(0, T, dtype=torch.long, device=device)
         x = self.wte(idx) + self.wpe(pos)
         residual = x.clone()
+        prev=x.clone()
         x = self.prelude(x, rope_freqs=self.rope_freqs, weights=None)
         residual = residual + x
         q = x.clone()
