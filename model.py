@@ -253,29 +253,23 @@ class GPT(nn.Module):
         # Initial steps
         pos = torch.arange(0, T, dtype=torch.long, device=device)
         x = self.wte(idx) + self.wpe(pos)
+
+        X = torch.fft.rfft(xn, dim=-1)
+    
+        # Apply crude ramp filter in frequency domain
+        T = xn.shape[-1]
+        S = X.shape[-1]  # This is T//2 + 1
+        r = torch.linspace(0, 1.0, S, device=X.device).reshape([1]* (X.ndim - 1) + [S])        
         residual = x.clone()
         prev=x.clone()
         x = self.prelude(x, rope_freqs=self.rope_freqs, weights=None)
         residual = residual + x
-
-        progressive_cut = 0.5  # start by cutting the first 50%
-        cut_fraction = progressive_cut
         
         for i, attn, mlp in zip(range(self.layers),self.attentions,self.mlps):
-            xn = x.clone()
-            x = attn(x + prev, rope_freqs=self.rope_freqs, weights=None)
-            residual = residual + mlp(x)
-        
-            X = torch.fft.rfft(xn, dim=-1)
-        
-            # Apply crude ramp filter in frequency domain
-            T = xn.shape[-1]
-            S = X.shape[-1]  # This is T//2 + 1
-            r = torch.linspace(0, 1.0, S, device=X.device).reshape([1]* (X.ndim - 1) + [S])
             X *= r  # Apply the ramp across the frequency axis
         
-            xn_filtered = torch.fft.irfft(X, n=T, dim=-1)
-        
+            prev = torch.fft.irfft(X, n=T, dim=-1)
+            x = attn(x + prev, rope_freqs=self.rope_freqs, weights=None)
             # Store into prev
             prev = xn_filtered
         
