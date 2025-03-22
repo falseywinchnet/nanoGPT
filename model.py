@@ -185,6 +185,10 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
+        self.prelude = CausalSelfAttention(config) 
+        self.coda =    CausalSelfAttention(config) 
+        self.initial = CausalSelfAttention(config) 
+
         self.attentions = nn.ModuleList([CausalSelfAttention(config) for _ in range(config.n_layer)])
         self.mlps = nn.ModuleList([MLP(config) for _ in range(config.n_layer)])
         self.ln_mlp = LayerNorm(config.n_embd, bias=True)
@@ -264,20 +268,18 @@ class GPT(nn.Module):
         #        c = c/2
           #  else:
         #        c = None
-        
+        x = self.prelude(x,rope_freqs=self.rope_freqs,weights=None)
+        residual = residual + x
+        q = residual.copy()
         # ---- Attention Stage ----
-        for i, attn, mlp in zip(range(self.layers),self.attentions, self.mlps):
-            if i ==0:
-                x = attn(x,rope_freqs=self.rope_freqs,weights=None)
-                residual = residual + x
-            else:
+        for attn in self.attentions:
                 xn = x.clone()
                 x = attn(x+prev,rope_freqs=self.rope_freqs,weights=None)
                 prev = xn
-                if i==1:
-                   residual = residual+ self.mlps[0](x)
 
-        residual = residual + self.mlps[-1](x)
+        
+        residual = residual+ self.initial(q)
+        residual = residual + self.coda(x)
 
         # Final norm and output
         x = self.ln_mlp(residual)
