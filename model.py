@@ -260,21 +260,13 @@ class GPT(nn.Module):
         residual = residual + x
         q = x.clone()
 
-        
-        permutation = torch.cat([
-            torch.arange(T//2),
-            torch.arange(T-1, (T-1)//2, -1)
-        ], dim=0)
-        x_reordered = x[:, permutation, :]
-
-        # Now your "first half" and "second half" are the front and reversed-back of x.
-        x_stack = torch.stack([x_reordered[:, :T//2, :], x_reordered[:, T//2:, :]], dim=0)
+        x_stack = torch.cat([x, x.flip(dims=[1])], dim=1)
         x_first_half = x_stack[:, :T]
         x_second_half = x_stack[:, T:]
         x_1 = torch.stack([
             x_first_half + x_second_half,
             x_first_half - x_second_half
-        ], dim=0)  # shape (2, B, T, C)
+        ], dim=0)  
         
         num_stages = int(math.log2(T))
         assert 2 ** num_stages == T, "Sequence length must be a power of 2"
