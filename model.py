@@ -261,7 +261,14 @@ class GPT(nn.Module):
         q = x.clone()
 
         
-        x_stack = torch.cat([x, -x.flip(dims=[1])], dim=1)
+        permutation = torch.cat([
+            torch.arange(T//2),
+            torch.arange(T-1, (T-1)//2, -1)
+        ], dim=0)
+        x_reordered = x[:, permutation, :]
+
+        # Now your "first half" and "second half" are the front and reversed-back of x.
+        x_stack = torch.stack([x_reordered[:, :T//2, :], x_reordered[:, T//2:, :]], dim=0)
         x_first_half = x_stack[:, :T]
         x_second_half = x_stack[:, T:]
         x_1 = torch.stack([
