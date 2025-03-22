@@ -314,8 +314,6 @@ class GPT(nn.Module):
             # Get corresponding skip connection
             skip, fwd_stage = skip_connections[-(s+1)]
             
-            # For debugging, print shapes
-            print(f"Stage {s}, x_diff shape: {x_diff.shape}, skip shape: {skip.shape}")
             
             # We need to match shapes for skip connection
             # In forward pass at stage s, we had shape (2^(s+1), B, T/(2^s)/2, C)
