@@ -252,65 +252,54 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None):
         B, T = idx.shape
         device = idx.device
-        C = self.config.n_embd  # or x.shape[-1] after embedding
-        # Step 1: Standard embeddings
+        C = self.config.n_embd
+        
+        # Steps 1-3 remain the same
         pos = torch.arange(0, T, dtype=torch.long, device=device)
-        x = self.wte(idx) + self.wpe(pos)         # (B, T, C)
+        x = self.wte(idx) + self.wpe(pos)
         residual = x.clone()
-        # Step 2: Prelude attention (if you have a "prelude" module)
         x = self.prelude(x, rope_freqs=self.rope_freqs, weights=None)
         residual = residual + x
-        # Step 3: Build initial shape => (2, B, T, C)
-        x_stack = torch.cat([x, -x.flip(dims=[1])], dim=1)  # (B, 2T, C)
-        x_first_half = x_stack[:, :T]                       # (B, T, C)
-        x_second_half = x_stack[:, T:]                      # (B, T, C)
+        
+        x_stack = torch.cat([x, -x.flip(dims=[1])], dim=1)
+        x_first_half = x_stack[:, :T]
+        x_second_half = x_stack[:, T:]
         x_1 = torch.stack([
-            x_first_half + x_second_half,  
+            x_first_half + x_second_half,
             x_first_half - x_second_half
         ], dim=0)  # shape (2, B, T, C)
         
-        # Guarantee T is a power of 2:
         num_stages = int(math.log2(T))
         assert 2 ** num_stages == T, "Sequence length must be a power of 2"
         
-        # ---- Butterfly Stages ----
-        # Modified: Starting with e = 2 instead of e = 1
-        e = 2  # Initial value for the first dimension (since x_1 starts as (2, B, T, C))
-        time_now = T  # Initial time dimension size
-        
+        # Butterfly stages
         for s in range(num_stages):
-            # At stage s, x_1 has shape (e, B, time_now, C)
-            half_time = time_now // 2
+            # Current shape: (2^(s+1), B, T/(2^s), C)
+            current_first_dim = 2 << s  # 2, 4, 8, etc.
+            current_time_dim = T >> s   # T, T/2, T/4, etc.
+            half_time = current_time_dim // 2
             
-            # No need to reshape here since we're maintaining the correct shape throughout
-            # x_1 already has shape (e, B, time_now, C)
+            # Split time dimension
+            x_first = x_1[:, :, :half_time, :]
+            x_second = x_1[:, :, half_time:, :]
             
-            # 2) Split time dimension
-            x_first = x_1[:, :, :half_time, :]      # shape (e, B, half_time, C)
-            x_second = x_1[:, :, half_time:, :]     # shape (e, B, half_time, C)
+            # Attention over x_second
+            x_second_flat = x_second.reshape(current_first_dim * B, half_time, C)
+            x_attn = self.attentions[s](x_second_flat)
+            x_attn = x_attn.reshape(current_first_dim, B, half_time, C)
             
-            # 3) Attention over x_second
-            x_attn = self.attentions[s](           # use stage s
-                x_second.reshape(e * B, half_time, C)
-            )
-            x_attn = x_attn.reshape(e, B, half_time, C)
-            
-            # 4) Combine
-            top    = x_first + x_attn
+            # Combine
+            top = x_first + x_attn
             bottom = x_first - x_attn
             
-            # 5) Concatenate along the first dimension => doubles it from e → 2e
-            x_1 = torch.cat([top, bottom], dim=0)   # shape = (2e, B, half_time, C)
-            
-            # Update for next iteration
-            e *= 2
-            time_now = half_time
+            # Stack for next iteration
+            x_1 = torch.cat([top, bottom], dim=0)
         
-        # After the loop: shape is (T, B, 1, C)
-        # => reshape to (B, T, C)
-        x_final = x_1.reshape(B, T, C)
+        # After the loop, x_1 has shape (2*T, B, 1, C)
+        # We need to select half of it and reshape to (B, T, C)
+        x_final = x_1[:T].reshape(B, T, C)  # Take first T elements of first dimension
         
-        # Optionally do coda, final LN, etc:
+        # Rest of the function remains the same
         residual = residual + self.coda(x_final)
         x = self.ln_mlp(residual)
         logits = self.lm_head(x)
@@ -318,8 +307,8 @@ class GPT(nn.Module):
         loss = None
         if targets is not None:
             loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), 
-                targets.view(-1), 
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
                 ignore_index=-1
             )
         return logits, loss
