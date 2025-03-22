@@ -186,8 +186,8 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
         self.prelude = CausalSelfAttention(config) 
-        self.coda =    CausalSelfAttention(config) 
-        self.initial = CausalSelfAttention(config) 
+        self.coda =    MLP(config)
+        self.initial = MLP(config)
 
         self.attentions = nn.ModuleList([CausalSelfAttention(config) for _ in range(config.n_layer)])
         self.mlps = nn.ModuleList([MLP(config) for _ in range(config.n_layer)])
@@ -271,15 +271,38 @@ class GPT(nn.Module):
         x = self.prelude(x,rope_freqs=self.rope_freqs,weights=None)
         residual = residual + x
         q = residual.clone()
+        x_stack = torch.cat([x, -x.flip(dims=[1])], dim=1)  # Stack original + time-reversed negated version
+        x_1 = torch.stack([x[:, :T] + x[:, T:], x[:, :T] - x[:, T:]], dim=0)  # Shape: (2, B, T, C)
+
+                          
         # ---- Attention Stage ----
-        for attn in self.attentions:
-                xn = x.clone()
-                x = attn(x+prev,rope_freqs=self.rope_freqs,weights=None)
-                prev = xn
+        for stage in range(depth):
+            e = 2 ** (stage + 1)
+            q = T // e
+        
+            # x_1: shape (e//2, B, 2q, C) → split into halves
+            x_1 = x_1.view(e//2, B, 2*q, C)
+        
+            x_first = x_1[:, :, :q, :]
+            x_second = x_1[:, :, q:, :]
+        
+            # Attention over the latter half
+            x_attn = self.attentions[stage](x_second.view(-1, q, C))  # flatten across batch/e
+            x_attn = x_attn.view(e//2, B, q, C)
+        
+            # Combine with first half
+            top = x_first + x_attn
+            bottom = x_first - x_attn
+        
+            # Stack next stage
+            x_1 = torch.cat([top, bottom], dim=0)  # (e, B, q, C)
+        
+        # Final reshape and slice
+        x_final = x_1.view(B, 2*T, C)[:, :T, :]
 
         
         residual = residual+ self.initial(q)
-        residual = residual + self.coda(x)
+        residual = residual + self.coda(x_final)
 
         # Final norm and output
         x = self.ln_mlp(residual)
