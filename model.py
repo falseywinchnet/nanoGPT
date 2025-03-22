@@ -254,14 +254,13 @@ class GPT(nn.Module):
         pos = torch.arange(0, T, dtype=torch.long, device=device)
         x = self.wte(idx) + self.wpe(pos)
 
-        X = torch.fft.rfft(xn, dim=-1)
+        X = torch.fft.rfft(x, dim=-1)
     
         # Apply crude ramp filter in frequency domain
-        T = xn.shape[-1]
+        T = x.shape[-1]
         S = X.shape[-1]  # This is T//2 + 1
         r = torch.linspace(0, 1.0, S, device=X.device).reshape([1]* (X.ndim - 1) + [S])        
         residual = x.clone()
-        prev=x.clone()
         x = self.prelude(x, rope_freqs=self.rope_freqs, weights=None)
         residual = residual + x
         
