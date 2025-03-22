@@ -249,11 +249,10 @@ class GPT(nn.Module):
 
 
     def forward(self, idx, targets=None):
-        b, t = idx.shape
+        b, T = idx.shape
         device = idx.device
-        self.t = self.t + 1
 
-        pos = torch.arange(0, t, dtype=torch.long, device=device)
+        pos = torch.arange(0, T, dtype=torch.long, device=device)
         x = self.wte(idx) + self.wpe(pos)
         
         residual = x  # Keep initial residual state
