@@ -248,111 +248,116 @@ class GPT(nn.Module):
 
     import math
     def forward(self, idx, targets=None):
-            B, T = idx.shape
-            device = idx.device
-            C = self.config.n_embd
+        B, T = idx.shape
+        device = idx.device
+        C = self.config.n_embd
+        
+        # Initial embedding steps remain the same
+        pos = torch.arange(0, T, dtype=torch.long, device=device)
+        x = self.wte(idx) + self.wpe(pos)
+        residual = x.clone()
+        x = self.prelude(x, rope_freqs=self.rope_freqs, weights=None)
+        residual = residual + x
+        
+        x_stack = torch.cat([x, -x.flip(dims=[1])], dim=1)
+        x_first_half = x_stack[:, :T]
+        x_second_half = x_stack[:, T:]
+        x_1 = torch.stack([
+            x_first_half + x_second_half,
+            x_first_half - x_second_half
+        ], dim=0)  # shape (2, B, T, C)
+        
+        num_stages = int(math.log2(T))
+        assert 2 ** num_stages == T, "Sequence length must be a power of 2"
+        
+        # Store skip connections
+        skip_connections = []
+        
+        # Forward butterfly stages (FFT-like)
+        for s in range(num_stages):
+            # Current shape: (2^(s+1), B, T/(2^s), C)
+            current_first_dim = 2 << s  # 2, 4, 8, etc.
+            current_time_dim = T >> s   # T, T/2, T/4, etc.
+            half_time = current_time_dim // 2
             
-            # Initial embedding steps remain the same
-            pos = torch.arange(0, T, dtype=torch.long, device=device)
-            x = self.wte(idx) + self.wpe(pos)
-            residual = x.clone()
-            x = self.prelude(x, rope_freqs=self.rope_freqs, weights=None)
-            residual = residual + x
+            # Split time dimension
+            x_first = x_1[:, :, :half_time, :]
+            x_second = x_1[:, :, half_time:, :]
             
-            x_stack = torch.cat([x, -x.flip(dims=[1])], dim=1)
-            x_first_half = x_stack[:, :T]
-            x_second_half = x_stack[:, T:]
-            x_1 = torch.stack([
-                x_first_half + x_second_half,
-                x_first_half - x_second_half
-            ], dim=0)  # shape (2, B, T, C)
+            # Store the input to attention for skip connection
+            # We store x_second before flattening to preserve its shape
+            skip_connections.append(x_second.clone())
             
-            num_stages = int(math.log2(T))
-            assert 2 ** num_stages == T, "Sequence length must be a power of 2"
+            # Attention over x_second
+            x_second_flat = x_second.reshape(current_first_dim * B, half_time, C)
+            x_attn = self.attentions[s](x_second_flat)
+            x_attn = x_attn.reshape(current_first_dim, B, half_time, C)
             
-            # Store intermediate activations for skip connections
-            skip_connections = []
+            # Combine
+            top = x_first + x_attn
+            bottom = x_first - x_attn
             
-            # Forward butterfly stages (FFT-like)
-            for s in range(num_stages):
-                # Save the input to this stage for skip connections
-                skip_connections.append(x_1)
-                
-                current_first_dim = 2 << s
-                current_time_dim = T >> s
-                half_time = current_time_dim // 2
-                
-                x_first = x_1[:, :, :half_time, :]
-                x_second = x_1[:, :, half_time:, :]
-                
-                x_second_flat = x_second.reshape(current_first_dim * B, half_time, C)
-                x_attn = self.attentions[s](x_second_flat)
-                x_attn = x_attn.reshape(current_first_dim, B, half_time, C)
-                
-                top = x_first + x_attn
-                bottom = x_first - x_attn
-                
-                x_1 = torch.cat([top, bottom], dim=0)
+            # Stack for next iteration
+            x_1 = torch.cat([top, bottom], dim=0)
+        
+        # After forward butterfly, x_1 has shape (2*T, B, 1, C)
+        
+        # Inverse butterfly stages (i-FFT-like)
+        # We'll work backwards through the stages
+        for s in range(num_stages-1, -1, -1):  # From num_stages-1 down to 0
+            # Current shape at start of inverse stage s: (2^(s+2), B, T/(2^(s+1)), C)
+            current_first_dim = 2 << (s+1)  # Starting with 2*T and halving each time
+            current_time_dim = T >> (s+1)   # Starting with 1 and doubling each time
             
-            # Inverse butterfly stages (i-FFT-like)
-            for s in range(num_stages-1, -1, -1):
-                current_first_dim = 2 << (s+1)
-                current_time_dim = T >> (s+1)
-                
-                half_dim = current_first_dim // 2
-                x_top = x_1[:half_dim]
-                x_bottom = x_1[half_dim:]
-                
-                # Get the corresponding skip connection
-                skip = skip_connections[s]
-                
-                # Apply skip connection - we need to match dimensions
-                # The skip has shape (2^(s+1), B, T/(2^s), C)
-                # We need to transform it to match our current shape
-                if s < num_stages - 1:  # Not needed for the first inverse stage
-                    # We need to extract the relevant part of the skip connection
-                    # to match our current working dimensions
-                    skip_time_dim = skip.size(2)
-                    skip_first_half = skip[:, :, :skip_time_dim//2, :]
-                    
-                    # Reshape skip connection to match current x_diff dimensions
-                    skip_matching = skip_first_half[:half_dim]  # Take only what we need
-                else:
-                    # For first inverse stage, we're already at the bottleneck
-                    skip_matching = skip
-                
-                # Apply difference attention with skip connection
-                x_diff = x_top - x_bottom
-                x_diff_flat = x_diff.reshape(half_dim * B, current_time_dim, C)
-                # Include skip connection information in the input to attention
-                skip_flat = skip_matching.reshape(half_dim * B, current_time_dim, C)
-                combined_input = torch.cat([x_diff_flat, skip_flat], dim=1)  # Concatenate along time
-                
-                # Apply attention to combined input
-                x_diff_attn = self.attn_rev[s](combined_input)[:, :current_time_dim, :]  # Keep only the first part
-                x_diff_attn = x_diff_attn.reshape(half_dim, B, current_time_dim, C)
-                
-                x_first = (x_top + x_bottom) * 0.5
-                x_second = x_diff_attn
-                
-                x_1 = torch.cat([x_first, x_second], dim=2)
+            # Split the first dimension in half
+            half_dim = current_first_dim // 2
+            x_top = x_1[:half_dim]
+            x_bottom = x_1[half_dim:]
             
-            # After inverse butterfly, x_1 should be back to shape (2, B, T, C)
-            x_final = x_1[0]  # Shape: (B, T, C)
+            # Apply inverse attention to their difference
+            x_diff = x_top - x_bottom
             
-            # Final processing
-            residual = residual + self.coda(x_final)
-            x = self.ln_mlp(residual)
-            logits = self.lm_head(x)
+            # Get the corresponding skip connection
+            skip = skip_connections[-(s+1)]  # Access skip connections in reverse order
             
-            loss = None
-            if targets is not None:
-                loss = F.cross_entropy(
-                    logits.view(-1, logits.size(-1)),
-                    targets.view(-1),
-                    ignore_index=-1
-                )
-            return logits, loss
+            # Add the skip connection - ensure shapes match
+            # Skip has shape (half_dim, B, current_time_dim, C)
+            if skip.shape[2] != x_diff.shape[2]:
+                # Ensure skip connection and current tensors have compatible shapes
+                # This handles cases where dimensions may have been reduced
+                skip = skip[:, :, :x_diff.shape[2], :]
+            
+            # Add skip connection to the input of the inverse attention
+            x_diff = x_diff + skip
+            
+            x_diff_flat = x_diff.reshape(half_dim * B, current_time_dim, C)
+            x_diff_attn = self.attn_rev[s](x_diff_flat)
+            x_diff_attn = x_diff_attn.reshape(half_dim, B, current_time_dim, C)
+            
+            # Reconstruct the x_first and x_second parts
+            x_first = (x_top + x_bottom) * 0.5
+            x_second = x_diff_attn
+            
+            # Combine them along the time dimension
+            x_1 = torch.cat([x_first, x_second], dim=2)  # Shape: (half_dim, B, 2*current_time_dim, C)
+        
+        # After inverse butterfly, x_1 should be back to shape (2, B, T, C)
+        # Select the first part 
+        x_final = x_1[0]  # Shape: (B, T, C)
+        
+        # Rest of the function remains the same
+        residual = residual + self.coda(x_final)
+        x = self.ln_mlp(residual)
+        logits = self.lm_head(x)
+        
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
+                ignore_index=-1
+            )
+        return logits, loss
             
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
