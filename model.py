@@ -266,24 +266,19 @@ class GPT(nn.Module):
             x = attn(x + prev, rope_freqs=self.rope_freqs, weights=None)
             residual = residual + mlp(x)
         
-            # FFT on time axis (assume last dim is time)
             X = torch.fft.rfft(xn, dim=-1)
         
-            # Determine cutoff bin
-            total_bins = X.shape[-1]
-            cutoff_bin = int(total_bins * cut_fraction)
+            # Apply crude ramp filter in frequency domain
+            T = xn.shape[-1]
+            F = X.shape[-1]  # This is T//2 + 1
+            r = torch.linspace(0, 1.0, F, device=X.device).reshape([1]* (X.ndim - 1) + [F])
+            X *= r  # Apply the ramp across the frequency axis
         
-            # Zero out below the cutoff
-            X[..., :cutoff_bin] = 0
-        
-            # Inverse FFT to get high-passed signal
-            xn_filtered = torch.fft.irfft(X, n=2 * (X.shape[-1] - 1), dim=-1)
+            xn_filtered = torch.fft.irfft(X, n=T, dim=-1)
         
             # Store into prev
             prev = xn_filtered
         
-            # On next iteration, cut even more of the low-end: add another half of remainder
-            cut_fraction += (1.0 - cut_fraction) * 0.5  # geometric growth toward 1.0
 
         residual = residual + self.coda(x)
         x = self.ln_mlp(residual)
