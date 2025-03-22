@@ -275,7 +275,7 @@ class GPT(nn.Module):
                 x = attn(x+prev,rope_freqs=self.rope_freqs,weights=None)
                 prev = xn
                 if i==1:
-                   residual = residual+ mlp[0](x)
+                   residual = residual+ self.mlps[0](x)
 
         residual = residual + self.mlps[-1](x)
 
