@@ -282,7 +282,7 @@ class GPT(nn.Module):
             q = T // e
         
             # x_1: shape (e//2, B, 2q, C) → split into halves
-            x_1 = x_1.view(e//2, B, 2*q, C)
+            x_1 = x_1.view(e, B, q, C)
         
             x_first = x_1[:, :, :q, :]
             x_second = x_1[:, :, q:, :]
