@@ -188,6 +188,7 @@ class GPT(nn.Module):
         self.prelude = CausalSelfAttention(config) 
         self.coda =    MLP(config)
         self.initial = MLP(config)
+        self.attn_rev = nn.ModuleList([CausalSelfAttention(config) for _ in range(8)])
 
         self.attentions = nn.ModuleList([CausalSelfAttention(config) for _ in range(8)])
         self.mlps = nn.ModuleList([MLP(config) for _ in range(config.n_layer)])
@@ -237,8 +238,6 @@ class GPT(nn.Module):
         )
 
 
-    
-    
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -246,7 +245,6 @@ class GPT(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
 
     import math
     def forward(self, idx, targets=None):
@@ -272,7 +270,7 @@ class GPT(nn.Module):
         num_stages = int(math.log2(T))
         assert 2 ** num_stages == T, "Sequence length must be a power of 2"
         
-        # Butterfly stages
+        # Forward butterfly stages (FFT-like)
         for s in range(num_stages):
             # Current shape: (2^(s+1), B, T/(2^s), C)
             current_first_dim = 2 << s  # 2, 4, 8, etc.
@@ -295,9 +293,36 @@ class GPT(nn.Module):
             # Stack for next iteration
             x_1 = torch.cat([top, bottom], dim=0)
         
-        # After the loop, x_1 has shape (2*T, B, 1, C)
-        # We need to select half of it and reshape to (B, T, C)
-        x_final = x_1[:T].reshape(B, T, C)  # Take first T elements of first dimension
+        # After forward butterfly, x_1 has shape (2*T, B, 1, C)
+        
+        # Inverse butterfly stages (i-FFT-like)
+        # We'll work backwards through the stages
+        for s in range(num_stages-1, -1, -1):  # From num_stages-1 down to 0
+            # Current shape at start of inverse stage s: (2^(s+2), B, T/(2^(s+1)), C)
+            current_first_dim = 2 << (s+1)  # Starting with 2*T and halving each time
+            current_time_dim = T >> (s+1)   # Starting with 1 and doubling each time
+            
+            # Split the first dimension in half
+            half_dim = current_first_dim // 2
+            x_top = x_1[:half_dim]
+            x_bottom = x_1[half_dim:]
+            
+            # Apply inverse attention to their difference
+            x_diff = x_top - x_bottom
+            x_diff_flat = x_diff.reshape(half_dim * B, current_time_dim, C)
+            x_diff_attn = self.attn_rev[s](x_diff_flat)
+            x_diff_attn = x_diff_attn.reshape(half_dim, B, current_time_dim, C)
+            
+            # Reconstruct the x_first and x_second parts
+            x_first = (x_top + x_bottom) * 0.5
+            x_second = x_diff_attn
+            
+            # Combine them along the time dimension
+            x_1 = torch.cat([x_first, x_second], dim=2)  # Shape: (half_dim, B, 2*current_time_dim, C)
+        
+        # After inverse butterfly, x_1 should be back to shape (2, B, T, C)
+        # Select the first part and reshape
+        x_final = x_1[0]  # Shape: (B, T, C)
         
         # Rest of the function remains the same
         residual = residual + self.coda(x_final)
@@ -312,8 +337,7 @@ class GPT(nn.Module):
                 ignore_index=-1
             )
         return logits, loss
-
-        
+            
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
         # e.g. we may load the GPT2 pretrained model checkpoint (block size 1024)
